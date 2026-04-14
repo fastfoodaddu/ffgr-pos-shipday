@@ -1,8 +1,9 @@
 require('dotenv').config();
-console.log('FFGR BUILD: shipday-debug-v3');
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
+
+console.log('FFGR BUILD: permissive-v1');
 
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err);
@@ -45,10 +46,6 @@ app.post('/webhooks/woocommerce/order-created', async (req, res) => {
     verifyWooWebhook(req);
 
     const order = req.body;
-    if (!isDeliveryOrder(order)) {
-      return res.status(200).json({ ok: true, skipped: 'not delivery' });
-    }
-
     const shipdayOrder = mapWooOrderToShipday(order);
     const result = await sendToShipday(shipdayOrder);
 
@@ -73,7 +70,8 @@ app.post('/webhooks/woocommerce/order-updated', async (req, res) => {
 function verifyWooWebhook(req) {
   const secret = process.env.WC_WEBHOOK_SECRET;
   if (!secret) {
-    throw new Error('WC_WEBHOOK_SECRET not configured');
+    console.log('WC_WEBHOOK_SECRET missing, skipping verification');
+    return true;
   }
 
   const signature = req.get('x-wc-webhook-signature');
@@ -95,46 +93,49 @@ function verifyWooWebhook(req) {
   return true;
 }
 
-function isDeliveryOrder(order) {
-  const shippingMethod = (order.shipping_lines || [])
-    .map((x) => (x.method_title || '').toLowerCase())
-    .join(' ');
-
-  return Boolean(order.shipping?.address_1) || shippingMethod.includes('delivery');
-}
-
 function mapWooOrderToShipday(order) {
   const billing = order.billing || {};
   const shipping = order.shipping || {};
 
-  const customerAddress = [
-    shipping.address_1,
-    shipping.address_2,
-    shipping.city,
-    shipping.state,
-    shipping.postcode,
-    shipping.country,
-  ]
-    .filter(Boolean)
-    .join(', ');
+  const customerAddress =
+    [
+      shipping.address_1,
+      shipping.address_2,
+      shipping.city,
+      shipping.state,
+      shipping.postcode,
+      shipping.country,
+    ]
+      .filter(Boolean)
+      .join(', ') ||
+    process.env.SHIPDAY_DEFAULT_ADDRESS ||
+    'Hithadhoo';
 
   return {
-    orderNumber: String(order.id),
+    orderNumber: String(order.id || Date.now()),
     customerName:
-      [billing.first_name, billing.last_name].filter(Boolean).join(' ') || 'Customer',
-    customerAddress: customerAddress || 'Address not provided',
+      [billing.first_name, billing.last_name].filter(Boolean).join(' ') ||
+      process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME ||
+      'Customer',
+    customerAddress,
     customerPhoneNumber:
-      billing.phone || process.env.SHIPDAY_DEFAULT_PHONE || '7739160',
-    restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
+      billing.phone ||
+      process.env.SHIPDAY_DEFAULT_PHONE ||
+      '7739160',
+    restaurantName:
+      process.env.SHIPDAY_RESTAURANT_NAME ||
+      'FFGR',
     restaurantAddress:
-      process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+      process.env.SHIPDAY_RESTAURANT_ADDRESS ||
+      'Addu City, Maldives',
     restaurantPhoneNumber:
-      process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
+      process.env.SHIPDAY_RESTAURANT_PHONE ||
+      '+9607739160',
     orderItem: (order.line_items || []).map((i) => ({
       name: i.name || 'Item',
       quantity: Number(i.quantity || 1),
     })),
-    totalOrderCost: parseFloat(order.total || 0),
+    totalOrderCost: parseFloat(order.total || 0) || 0
   };
 }
 
@@ -350,20 +351,18 @@ async function pollLoyverseAndSend() {
         .join(' ')
         .trim();
 
-      console.log('DEBUG receipt:', receipt.receipt_number || receipt.id);
-      console.log('DEBUG noteText:', JSON.stringify(noteText));
-
-      if (!noteText) {
-        console.log(
-          `DEBUG skipping receipt ${
-            receipt.receipt_number || receipt.id
-          } because noteText is empty`
-        );
-        continue;
-      }
+      const finalAddress =
+        noteText ||
+        receipt.customer?.address ||
+        receipt.customer_address ||
+        process.env.SHIPDAY_DEFAULT_ADDRESS ||
+        'Hithadhoo';
 
       const customerName =
-        receipt.customer?.name || receipt.customer_name || 'Customer';
+        receipt.customer?.name ||
+        receipt.customer_name ||
+        process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME ||
+        'Customer';
 
       const customerPhone =
         receipt.customer?.phone_number ||
@@ -378,23 +377,20 @@ async function pollLoyverseAndSend() {
       }));
 
       const shipdayOrder = {
-        orderNumber: String(receipt.receipt_number || receipt.id),
+        orderNumber: String(receipt.receipt_number || receipt.id || Date.now()),
         customerName,
         customerPhoneNumber: customerPhone,
-        customerAddress: noteText,
-        restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
+        customerAddress: finalAddress,
+        restaurantName:
+          process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
         restaurantAddress:
           process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
         restaurantPhoneNumber:
           process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
-        orderItem: items,
-        totalOrderCost: parseFloat(receipt.total_money || 0),
+        orderItem: items.length ? items : [{ name: 'Receipt Order', quantity: 1 }],
+        totalOrderCost: parseFloat(receipt.total_money || 0) || 0,
       };
 
-      console.log(
-        'DEBUG about to call Shipday for receipt:',
-        receipt.receipt_number || receipt.id
-      );
       console.log('About to send to Shipday:', JSON.stringify(shipdayOrder));
 
       try {
