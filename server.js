@@ -384,7 +384,6 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
     }
   }
 
-  lastPollIso = nowIso;
   return { count: receipts.length, cursor, summary, receipts };
 }
 
@@ -393,54 +392,70 @@ async function pollLoyverseAndSend() {
     const { receipts } = await fetchLoyverseReceipts();
 
     for (const receipt of receipts) {
-      if (!receipt?.id) continue;
+      const receiptId =
+        receipt.id ||
+        receipt.receipt_id ||
+        receipt.receipt_number;
 
-      if (processedReceipts.has(receipt.id)) {
-        console.log(`Skipping duplicate receipt ${receipt.id}`);
+      if (!receiptId) {
+        console.log('Skipping receipt with no usable id:', JSON.stringify(receipt));
         continue;
       }
 
-      console.log('PROCESSING RECEIPT:', receipt.receipt_number);
+      if (processedReceipts.has(String(receiptId))) {
+        console.log(`Skipping duplicate receipt ${receiptId}`);
+        continue;
+      }
+
+      console.log('PROCESSING RECEIPT:', receipt.receipt_number || receiptId);
 
       const payload = {
-        orderNumber: String(receipt.receipt_number || receipt.id),
+        orderNumber: String(receipt.receipt_number || receiptId),
         customerName:
-          receipt.customer?.name || 'Customer',
+          receipt.customer?.name ||
+          process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME ||
+          'Customer',
         customerPhoneNumber:
           receipt.customer?.phone_number ||
+          receipt.customer?.phone ||
           receipt.phone_number ||
           process.env.SHIPDAY_DEFAULT_PHONE ||
           '7739160',
         customerAddress:
           receipt.note ||
+          receipt.comment ||
+          receipt.customer?.address ||
+          receipt.customer_address ||
           process.env.SHIPDAY_DEFAULT_ADDRESS ||
           'Hithadhoo',
-        restaurantName: process.env.SHIPDAY_RESTAURANT_NAME,
-        restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS,
-        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE,
+        restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
+        restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
         orderItem: (receipt.line_items || []).map(item => ({
-          name: item.item_name || 'Item',
+          name: item.item_name || item.name || item.item?.item_name || 'Item',
           quantity: Number(item.quantity || 1)
         })),
         totalOrderCost: parseFloat(receipt.total_money || 0) || 1
       };
 
+      if (!payload.orderItem.length) {
+        payload.orderItem = [{ name: 'Order', quantity: 1 }];
+      }
+
       console.log('LOYVERSE -> SHIPDAY:', JSON.stringify(payload));
 
       try {
         const result = await sendToShipday(payload);
-        processedReceipts.add(receipt.id);
+        processedReceipts.add(String(receiptId));
         console.log('LOYVERSE SENT:', result);
       } catch (err) {
         console.error('LOYVERSE ERROR:', err.response?.data || err.message);
       }
     }
 
-    // 🔥 IMPORTANT: update AFTER processing
     if (receipts.length > 0) {
       lastPollIso = new Date().toISOString();
     }
-
   } catch (err) {
     console.error('Loyverse poll error:', err.response?.data || err.message);
   }
