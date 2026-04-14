@@ -366,74 +366,49 @@ async function pollLoyverseAndSend() {
     for (const receipt of receipts) {
       if (!receipt?.id) continue;
 
-      if (processedReceipts.has(receipt.id)) {
-        console.log(`Skipping duplicate receipt ${receipt.id}`);
-        continue;
-      }
-
-      const noteText = [
-        receipt.note,
-        receipt.comment,
-        receipt.customer_note,
-        receipt.delivery_note,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-
-      const finalAddress =
-        noteText ||
-        receipt.customer?.address ||
-        receipt.customer_address ||
-        process.env.SHIPDAY_DEFAULT_ADDRESS ||
-        'Hithadhoo';
+      if (processedReceipts.has(receipt.id)) continue;
 
       const customerName =
-        receipt.customer?.name ||
-        receipt.customer_name ||
-        process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME ||
-        'Customer';
+        receipt.customer?.name || 'Customer';
 
       const customerPhone =
         receipt.customer?.phone_number ||
-        receipt.customer?.phone ||
         receipt.phone_number ||
         process.env.SHIPDAY_DEFAULT_PHONE ||
         '7739160';
 
+      const address =
+        receipt.note ||
+        process.env.SHIPDAY_DEFAULT_ADDRESS ||
+        'Hithadhoo';
+
       const items = (receipt.line_items || []).map((item) => ({
-        name: item.item_name || item.name || item.item?.item_name || 'Item',
+        name: item.item_name || 'Item',
         quantity: Number(item.quantity || 1),
       }));
 
       const shipdayOrder = {
-        orderNumber: String(receipt.receipt_number || receipt.id || Date.now()),
+        orderNumber: String(receipt.receipt_number || receipt.id),
         customerName,
         customerPhoneNumber: customerPhone,
-        customerAddress: finalAddress,
-        restaurantName:
-          process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
-        restaurantAddress:
-          process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
-        restaurantPhoneNumber:
-          process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
-        orderItem: items.length ? items : [{ name: 'Receipt Order', quantity: 1 }],
-        totalOrderCost: parseFloat(receipt.total_money || 0) || 0,
+        customerAddress: address,
+        restaurantName: process.env.SHIPDAY_RESTAURANT_NAME,
+        restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS,
+        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE,
+        orderItem: items.length ? items : [{ name: 'Order', quantity: 1 }],
+        totalOrderCost: parseFloat(receipt.total_money || 0) || 1,
       };
 
-      console.log('About to send to Shipday:', JSON.stringify(shipdayOrder));
+      console.log('LOYVERSE → Shipday:', JSON.stringify(shipdayOrder));
 
       try {
         const result = await sendToShipday(shipdayOrder);
         processedReceipts.add(receipt.id);
-        console.log(
-          `Sent receipt ${receipt.receipt_number || receipt.id} to Shipday`,
-          result
-        );
-      } catch (shipErr) {
+        console.log('LOYVERSE sent to Shipday:', result);
+      } catch (err) {
         console.error(
-          `Shipday send failed for receipt ${receipt.receipt_number || receipt.id}:`,
-          shipErr.response?.data || shipErr.message
+          'LOYVERSE Shipday error:',
+          err.response?.data || err.message
         );
       }
     }
