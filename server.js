@@ -3,6 +3,14 @@ const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED REJECTION:', err);
+});
+
 const app = express();
 app.use(express.json({ verify: rawBodySaver }));
 
@@ -17,10 +25,7 @@ const SHIPDAY_BASE = 'https://api.shipday.com';
 const LOYVERSE_API_BASE = 'https://api.loyverse.com';
 const POLL_INTERVAL_MS = Number(process.env.LOYVERSE_POLL_INTERVAL_MS || 60000);
 
-// In-memory duplicate protection for current runtime only
 const processedReceipts = new Set();
-
-// Start by looking back a small window
 let lastPollIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
 app.get('/health', (_req, res) => {
@@ -72,7 +77,6 @@ function verifyWooWebhook(req) {
 
   const signature = req.get('x-wc-webhook-signature');
 
-  // Woo test/save requests may arrive without signature
   if (!signature) {
     console.log('No WooCommerce signature header, skipping verification');
     return true;
@@ -92,7 +96,7 @@ function verifyWooWebhook(req) {
 
 function isDeliveryOrder(order) {
   const shippingMethod = (order.shipping_lines || [])
-    .map(x => (x.method_title || '').toLowerCase())
+    .map((x) => (x.method_title || '').toLowerCase())
     .join(' ');
 
   return Boolean(order.shipping?.address_1) || shippingMethod.includes('delivery');
@@ -108,22 +112,28 @@ function mapWooOrderToShipday(order) {
     shipping.city,
     shipping.state,
     shipping.postcode,
-    shipping.country
-  ].filter(Boolean).join(', ');
+    shipping.country,
+  ]
+    .filter(Boolean)
+    .join(', ');
 
   return {
     orderNumber: String(order.id),
-    customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ') || 'Customer',
+    customerName:
+      [billing.first_name, billing.last_name].filter(Boolean).join(' ') || 'Customer',
     customerAddress: customerAddress || 'Address not provided',
-    customerPhoneNumber: billing.phone || process.env.SHIPDAY_DEFAULT_PHONE || '7739160',
+    customerPhoneNumber:
+      billing.phone || process.env.SHIPDAY_DEFAULT_PHONE || '7739160',
     restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
-    restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
-    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
-    orderItem: (order.line_items || []).map(i => ({
+    restaurantAddress:
+      process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+    restaurantPhoneNumber:
+      process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
+    orderItem: (order.line_items || []).map((i) => ({
       name: i.name || 'Item',
-      quantity: Number(i.quantity || 1)
+      quantity: Number(i.quantity || 1),
     })),
-    totalOrderCost: parseFloat(order.total || 0)
+    totalOrderCost: parseFloat(order.total || 0),
   };
 }
 
@@ -138,7 +148,10 @@ app.get('/callback', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing code' });
     }
 
-    if (process.env.LOYVERSE_OAUTH_STATE && state !== process.env.LOYVERSE_OAUTH_STATE) {
+    if (
+      process.env.LOYVERSE_OAUTH_STATE &&
+      state !== process.env.LOYVERSE_OAUTH_STATE
+    ) {
       return res.status(400).json({ ok: false, error: 'Invalid state' });
     }
 
@@ -149,14 +162,14 @@ app.get('/callback', async (req, res) => {
         client_secret: process.env.LOYVERSE_CLIENT_SECRET,
         redirect_uri: process.env.LOYVERSE_REDIRECT_URI,
         code: String(code),
-        grant_type: 'authorization_code'
+        grant_type: 'authorization_code',
       }).toString(),
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json'
+          Accept: 'application/json',
         },
-        timeout: 20000
+        timeout: 20000,
       }
     );
 
@@ -164,15 +177,16 @@ app.get('/callback', async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      message: 'Copy access_token into LOYVERSE_API_KEY and refresh_token into LOYVERSE_REFRESH_TOKEN',
-      token: tokenRes.data
+      message:
+        'Copy access_token into LOYVERSE_API_KEY and refresh_token into LOYVERSE_REFRESH_TOKEN',
+      token: tokenRes.data,
     });
   } catch (err) {
     console.error('Loyverse OAuth callback error:', err.response?.data || err.message);
     return res.status(500).json({
       ok: false,
       error: err.message,
-      details: err.response?.data || null
+      details: err.response?.data || null,
     });
   }
 });
@@ -186,7 +200,9 @@ app.get('/auth/loyverse', (_req, res) => {
   );
 
   if (!clientId || !redirectUri) {
-    return res.status(500).send('LOYVERSE_CLIENT_ID or LOYVERSE_REDIRECT_URI not configured');
+    return res
+      .status(500)
+      .send('LOYVERSE_CLIENT_ID or LOYVERSE_REDIRECT_URI not configured');
   }
 
   const authUrl =
@@ -203,7 +219,9 @@ app.get('/auth/loyverse', (_req, res) => {
 app.post('/auth/loyverse/refresh', async (_req, res) => {
   try {
     if (!process.env.LOYVERSE_REFRESH_TOKEN) {
-      return res.status(400).json({ ok: false, error: 'LOYVERSE_REFRESH_TOKEN not configured' });
+      return res
+        .status(400)
+        .json({ ok: false, error: 'LOYVERSE_REFRESH_TOKEN not configured' });
     }
 
     const tokenRes = await axios.post(
@@ -212,14 +230,14 @@ app.post('/auth/loyverse/refresh', async (_req, res) => {
         client_id: process.env.LOYVERSE_CLIENT_ID,
         client_secret: process.env.LOYVERSE_CLIENT_SECRET,
         refresh_token: process.env.LOYVERSE_REFRESH_TOKEN,
-        grant_type: 'refresh_token'
+        grant_type: 'refresh_token',
       }).toString(),
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json'
+          Accept: 'application/json',
         },
-        timeout: 20000
+        timeout: 20000,
       }
     );
 
@@ -227,21 +245,22 @@ app.post('/auth/loyverse/refresh', async (_req, res) => {
 
     return res.status(200).json({
       ok: true,
-      message: 'Update LOYVERSE_API_KEY and LOYVERSE_REFRESH_TOKEN in Railway with these new values',
-      token: tokenRes.data
+      message:
+        'Update LOYVERSE_API_KEY and LOYVERSE_REFRESH_TOKEN in Railway with these new values',
+      token: tokenRes.data,
     });
   } catch (err) {
     console.error('Loyverse token refresh error:', err.response?.data || err.message);
     return res.status(500).json({
       ok: false,
       error: err.message,
-      details: err.response?.data || null
+      details: err.response?.data || null,
     });
   }
 });
 
 // -----------------------------
-// Loyverse polling + debug
+// Loyverse debug + polling
 // -----------------------------
 app.get('/debug/loyverse', async (_req, res) => {
   try {
@@ -251,7 +270,7 @@ app.get('/debug/loyverse', async (_req, res) => {
     return res.status(500).json({
       ok: false,
       error: err.message,
-      details: err.response?.data || null
+      details: err.response?.data || null,
     });
   }
 });
@@ -266,13 +285,13 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
   const response = await axios.get(`${LOYVERSE_API_BASE}/v1.0/receipts`, {
     headers: {
       Authorization: `Bearer ${process.env.LOYVERSE_API_KEY}`,
-      Accept: 'application/json'
+      Accept: 'application/json',
     },
     params: {
       updated_at_min: lastPollIso,
-      limit: 100
+      limit: 100,
     },
-    timeout: 20000
+    timeout: 20000,
   });
 
   const receipts = response.data?.receipts || [];
@@ -282,21 +301,24 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
     console.log(`Loyverse returned ${receipts.length} receipts since ${lastPollIso}`);
   }
 
-  const summary = receipts.map(r => ({
+  const summary = receipts.map((r) => ({
     id: r.id,
     receipt_number: r.receipt_number,
     note: r.note || null,
     comment: r.comment || null,
     total_money: r.total_money ?? null,
     customer_name: r.customer?.name || r.customer_name || null,
-    customer_phone: r.customer?.phone_number || r.customer?.phone || r.phone_number || null,
-    items_count: Array.isArray(r.line_items) ? r.line_items.length : 0
+    customer_phone:
+      r.customer?.phone_number || r.customer?.phone || r.phone_number || null,
+    items_count: Array.isArray(r.line_items) ? r.line_items.length : 0,
   }));
 
   if (!debug) {
     for (const s of summary.slice(0, 10)) {
       console.log(
-        `Receipt ${s.receipt_number || s.id} | note=${JSON.stringify(s.note || s.comment || '')} | phone=${JSON.stringify(s.customer_phone || '')}`
+        `Receipt ${s.receipt_number || s.id} | note=${JSON.stringify(
+          s.note || s.comment || ''
+        )} | phone=${JSON.stringify(s.customer_phone || '')}`
       );
     }
   }
@@ -321,22 +343,26 @@ async function pollLoyverseAndSend() {
         receipt.note,
         receipt.comment,
         receipt.customer_note,
-        receipt.delivery_note
+        receipt.delivery_note,
       ]
         .filter(Boolean)
         .join(' ')
         .trim();
 
-      // Treat any receipt with a note/address as delivery
+      console.log('DEBUG receipt:', receipt.receipt_number || receipt.id);
+      console.log('DEBUG noteText:', JSON.stringify(noteText));
+
       if (!noteText) {
-        console.log(`Skipping receipt ${receipt.receipt_number || receipt.id} - no address/note`);
+        console.log(
+          `DEBUG skipping receipt ${
+            receipt.receipt_number || receipt.id
+          } because noteText is empty`
+        );
         continue;
       }
 
       const customerName =
-        receipt.customer?.name ||
-        receipt.customer_name ||
-        'Customer';
+        receipt.customer?.name || receipt.customer_name || 'Customer';
 
       const customerPhone =
         receipt.customer?.phone_number ||
@@ -345,9 +371,9 @@ async function pollLoyverseAndSend() {
         process.env.SHIPDAY_DEFAULT_PHONE ||
         '7739160';
 
-      const items = (receipt.line_items || []).map(item => ({
+      const items = (receipt.line_items || []).map((item) => ({
         name: item.item_name || item.name || item.item?.item_name || 'Item',
-        quantity: Number(item.quantity || 1)
+        quantity: Number(item.quantity || 1),
       }));
 
       const shipdayOrder = {
@@ -356,18 +382,27 @@ async function pollLoyverseAndSend() {
         customerPhoneNumber: customerPhone,
         customerAddress: noteText,
         restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
-        restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
-        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
+        restaurantAddress:
+          process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+        restaurantPhoneNumber:
+          process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
         orderItem: items,
-        totalOrderCost: parseFloat(receipt.total_money || 0)
+        totalOrderCost: parseFloat(receipt.total_money || 0),
       };
 
+      console.log(
+        'DEBUG about to call Shipday for receipt:',
+        receipt.receipt_number || receipt.id
+      );
       console.log('About to send to Shipday:', JSON.stringify(shipdayOrder));
 
       try {
         const result = await sendToShipday(shipdayOrder);
         processedReceipts.add(receipt.id);
-        console.log(`Sent receipt ${receipt.receipt_number || receipt.id} to Shipday`, result);
+        console.log(
+          `Sent receipt ${receipt.receipt_number || receipt.id} to Shipday`,
+          result
+        );
       } catch (shipErr) {
         console.error(
           `Shipday send failed for receipt ${receipt.receipt_number || receipt.id}:`,
@@ -388,9 +423,9 @@ async function sendToShipday(payload) {
     headers: {
       Accept: 'application/json',
       Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
     },
-    timeout: 20000
+    timeout: 20000,
   });
 
   return data;
@@ -403,7 +438,6 @@ app.listen(PORT, () => {
   console.log(`FFGR bridge running on port ${PORT}`);
 });
 
-// Start polling shortly after boot, then every minute
 function startPolling() {
   console.log('Starting Loyverse polling...');
 
@@ -416,5 +450,4 @@ function startPolling() {
   }, POLL_INTERVAL_MS);
 }
 
-// start after server boots
 setTimeout(startPolling, 10000);
