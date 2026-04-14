@@ -13,165 +13,255 @@ function rawBodySaver(req, res, buf) {
 const PORT = process.env.PORT || 8080;
 const SHIPDAY_BASE = 'https://api.shipday.com';
 
-// 🔥 Memory store (avoid duplicates)
+// In-memory duplicate protection for current runtime
 const processedReceipts = new Set();
 
+// Track latest successful poll window
+let lastPollIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
 app.get('/health', (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, service: 'ffgr-pos-shipday-bridge' });
 });
 
+app.get('/debug/loyverse', async (_req, res) => {
+  try {
+    const data = await fetchLoyverseReceipts(true);
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+      details: err.response?.data || null
+    });
+  }
+});
 
-// ==============================
-// 🔹 WooCommerce Order Created
-// ==============================
 app.post('/webhooks/woocommerce/order-created', async (req, res) => {
   try {
     verifyWooWebhook(req);
 
     const order = req.body;
-
     if (!isDeliveryOrder(order)) {
-      return res.status(200).json({ skipped: true });
+      return res.status(200).json({ ok: true, skipped: 'not delivery' });
     }
 
-    const data = mapWooOrder(order);
-    await sendToShipday(data);
+    const shipdayOrder = mapWooOrder(order);
+    const result = await sendToShipday(shipdayOrder);
 
-    return res.status(200).json({ ok: true });
-
+    return res.status(200).json({ ok: true, shipday: result });
   } catch (err) {
-    console.error('WC error:', err.message);
-    return res.status(500).send('Error');
+    console.error('WC create error:', err.response?.data || err.message);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
+app.post('/webhooks/woocommerce/order-updated', async (_req, res) => {
+  return res.status(200).json({ ok: true });
+});
 
-// ==============================
-// 🔹 WooCommerce Signature
-// ==============================
 function verifyWooWebhook(req) {
   const secret = process.env.WC_WEBHOOK_SECRET;
-  const signature = req.get('x-wc-webhook-signature');
+  if (!secret) throw new Error('WC_WEBHOOK_SECRET not configured');
 
-  if (!signature) return true;
+  const signature = req.get('x-wc-webhook-signature');
+  if (!signature) {
+    console.log('No WooCommerce signature header, skipping verification');
+    return true;
+  }
 
   const digest = crypto
     .createHmac('sha256', secret)
     .update(req.rawBody)
     .digest('base64');
 
-  if (digest !== signature) throw new Error('Invalid signature');
+  if (digest !== signature) {
+    throw new Error('Invalid WooCommerce webhook signature');
+  }
 
   return true;
 }
 
-
-// ==============================
-// 🔹 Woo Mapping
-// ==============================
 function isDeliveryOrder(order) {
-  return (order.shipping?.address_1 || '').length > 0;
+  const shippingMethod = (order.shipping_lines || [])
+    .map(x => (x.method_title || '').toLowerCase())
+    .join(' ');
+  return Boolean(order.shipping?.address_1) || shippingMethod.includes('delivery');
 }
 
 function mapWooOrder(order) {
+  const billing = order.billing || {};
+  const shipping = order.shipping || {};
+
+  const address = [
+    shipping.address_1,
+    shipping.address_2,
+    shipping.city,
+    shipping.state,
+    shipping.postcode,
+    shipping.country
+  ]
+    .filter(Boolean)
+    .join(', ');
+
   return {
     orderNumber: String(order.id),
-    customerName: `${order.billing.first_name} ${order.billing.last_name}`,
-    customerAddress: order.shipping.address_1,
-    customerPhoneNumber: order.billing.phone,
-    restaurantName: "FFGR",
-    restaurantAddress: "Addu City, Maldives",
+    customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ') || 'Customer',
+    customerAddress: address || 'Address not provided',
+    customerPhoneNumber: billing.phone || '',
+    restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
+    restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '',
     orderItem: (order.line_items || []).map(i => ({
-      name: i.name,
-      quantity: i.quantity
+      name: i.name || 'Item',
+      quantity: Number(i.quantity || 1)
     })),
-    totalOrderCost: parseFloat(order.total)
+    totalOrderCost: parseFloat(order.total || 0)
   };
 }
 
+async function fetchLoyverseReceipts(debugMode = false) {
+  if (!process.env.LOYVERSE_API_KEY) {
+    throw new Error('LOYVERSE_API_KEY not configured');
+  }
 
-// ==============================
-// 🔹 Loyverse API Pull
-// ==============================
-async function fetchLoyverseOrders() {
+  const nowIso = new Date().toISOString();
+
+  const response = await axios.get('https://api.loyverse.com/v1.0/receipts', {
+    headers: {
+      Authorization: `Bearer ${process.env.LOYVERSE_API_KEY}`,
+      Accept: 'application/json'
+    },
+    params: {
+      updated_at_min: lastPollIso,
+      limit: 100
+    },
+    timeout: 20000
+  });
+
+  const receipts = response.data?.receipts || [];
+  const summary = receipts.map(r => ({
+    id: r.id,
+    receipt_number: r.receipt_number,
+    note: r.note || null,
+    comment: r.comment || null,
+    customer_name:
+      r.customer?.name ||
+      r.customer_name ||
+      null,
+    phone:
+      r.customer?.phone_number ||
+      r.customer?.phone ||
+      r.phone_number ||
+      null,
+    total_money: r.total_money ?? null,
+    line_items_count: Array.isArray(r.line_items) ? r.line_items.length : 0
+  }));
+
+  if (!debugMode) {
+    console.log(`Loyverse returned ${receipts.length} receipts since ${lastPollIso}`);
+    for (const s of summary.slice(0, 10)) {
+      console.log(
+        `Receipt ${s.receipt_number || s.id} | note=${JSON.stringify(s.note || s.comment || '')} | phone=${JSON.stringify(s.phone || '')}`
+      );
+    }
+  }
+
+  lastPollIso = nowIso;
+
+  return { count: receipts.length, receipts, summary };
+}
+
+async function pollLoyverseAndSend() {
   try {
-    console.log('Fetching Loyverse receipts...');
-
-    const res = await axios.get(
-      'https://api.loyverse.com/v1.0/receipts',
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.LOYVERSE_API_KEY}`
-        }
-      }
-    );
-
-    const receipts = res.data.receipts || [];
+    const { receipts } = await fetchLoyverseReceipts(false);
 
     for (const receipt of receipts) {
+      if (!receipt?.id) continue;
+      if (processedReceipts.has(receipt.id)) {
+        console.log(`Skipping duplicate receipt ${receipt.id}`);
+        continue;
+      }
 
-      // ❌ Skip duplicates
-      if (processedReceipts.has(receipt.id)) continue;
+      const noteText = [
+        receipt.note,
+        receipt.comment,
+        receipt.customer_note,
+        receipt.delivery_note
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
 
-      // Only DELIVERY orders
-      if (!receipt.note || !receipt.note.toLowerCase().includes('delivery')) continue;
+      // Keep this rule simple for FFGR:
+      // only receipts marked with DELIVERY in note/comment go to Shipday
+      if (!noteText.toLowerCase().includes('delivery')) {
+        console.log(`Skipping non-delivery receipt ${receipt.receipt_number || receipt.id}`);
+        continue;
+      }
 
-      console.log('Processing receipt:', receipt.receipt_number);
+      const customerName =
+        receipt.customer?.name ||
+        receipt.customer_name ||
+        'Customer';
+
+      const phone =
+        receipt.customer?.phone_number ||
+        receipt.customer?.phone ||
+        receipt.phone_number ||
+        '';
 
       const items = (receipt.line_items || []).map(item => ({
-        name: item.item_name,
-        quantity: item.quantity,
+        name:
+          item.item_name ||
+          item.name ||
+          item.item?.item_name ||
+          'Item',
+        quantity: Number(item.quantity || 1)
       }));
 
-      const orderData = {
-        orderNumber: receipt.receipt_number,
-        customerName: receipt.customer?.name || "Customer",
-        customerPhoneNumber: receipt.customer?.phone_number || "",
-        customerAddress: receipt.note,
-        restaurantName: "FFGR",
-        restaurantAddress: "Addu City, Maldives",
+      const shipdayOrder = {
+        orderNumber: String(receipt.receipt_number || receipt.id),
+        customerName,
+        customerPhoneNumber: phone,
+        customerAddress: noteText || 'Address not provided',
+        restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
+        restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '',
         orderItem: items,
         totalOrderCost: parseFloat(receipt.total_money || 0)
       };
 
-      await sendToShipday(orderData);
+      console.log('Sending to Shipday:', JSON.stringify(shipdayOrder));
 
+      const result = await sendToShipday(shipdayOrder);
       processedReceipts.add(receipt.id);
 
-      console.log('Sent to Shipday:', receipt.receipt_number);
+      console.log(`Sent receipt ${receipt.receipt_number || receipt.id} to Shipday`, result);
     }
-
   } catch (err) {
-    console.error('Loyverse API error:', err.response?.data || err.message);
+    console.error('Loyverse poll error:', err.response?.data || err.message);
   }
 }
 
-
-// ==============================
-// 🔹 Send to Shipday
-// ==============================
-async function sendToShipday(data) {
-  const res = await axios.post(`${SHIPDAY_BASE}/orders`, data, {
+async function sendToShipday(payload) {
+  const { data } = await axios.post(`${SHIPDAY_BASE}/orders`, payload, {
     headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${process.env.SHIPDAY_API_KEY}`
-    }
+      Accept: 'application/json',
+      Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 20000
   });
 
-  console.log('Shipday response:', res.data);
-  return res.data;
+  return data;
 }
 
+// Poll every 60 seconds
+setInterval(pollLoyverseAndSend, 60000);
 
-// ==============================
-// 🔹 AUTO RUN (every 60 sec)
-// ==============================
-setInterval(fetchLoyverseOrders, 60000);
+// Run one poll shortly after startup
+setTimeout(pollLoyverseAndSend, 5000);
 
-
-// ==============================
-// 🔹 Start Server
-// ==============================
 app.listen(PORT, () => {
   console.log(`FFGR bridge running on port ${PORT}`);
 });
