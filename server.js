@@ -395,9 +395,17 @@ async function sendToShipday(payload) {
 
   return data;
 }
-    timeout: 20000
-  });
 
+// -----------------------------
+// Start + scheduler
+// -----------------------------
+app.listen(PORT, () => {
+  console.log(`FFGR bridge running on port ${PORT}`);
+});
+
+// Start polling shortly after boot, then every minute
+setTimeout(pollLoyverseAndSend, 5000);
+setInterval(pollLoyverseAndSend, POLL_INTERVAL_MS);
   return data;
 }
 
