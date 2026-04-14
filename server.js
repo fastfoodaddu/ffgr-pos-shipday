@@ -12,82 +12,48 @@ function rawBodySaver(req, res, buf) {
   }
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const SHIPDAY_BASE = 'https://api.shipday.com';
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'ffgr-pos-shipday-bridge' });
 });
 
+
+// ==============================
+// 🔹 WooCommerce - Order Created
+// ==============================
 app.post('/webhooks/woocommerce/order-created', async (req, res) => {
   try {
     verifyWooWebhook(req);
-    const payload = req.body;
-    if (!isDeliveryOrder(payload)) {
-      return res.status(200).json({ ok: true, skipped: 'not a delivery order' });
+
+    const order = req.body;
+
+    if (!isDeliveryOrder(order)) {
+      return res.status(200).json({ ok: true, skipped: 'not delivery' });
     }
-    const shipdayOrder = mapWooOrderToShipday(payload);
+
+    const shipdayOrder = mapWooOrder(order);
     const result = await createShipdayOrder(shipdayOrder);
 
-    if (process.env.SHIPDAY_AUTO_ASSIGN === 'true' && process.env.SHIPDAY_CARRIER_NAME) {
-      await assignShipdayOrder(result.orderId || result.id, process.env.SHIPDAY_CARRIER_NAME);
-    }
-
     return res.status(200).json({ ok: true, shipday: result });
-  } catch (error) {
-    console.error('WC create webhook error:', error.response?.data || error.message);
-    return res.status(500).json({ ok: false, error: error.message, details: error.response?.data || null });
+
+  } catch (err) {
+    console.error('WC create error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/webhooks/woocommerce/order-updated', async (req, res) => {
-  try {
-    verifyWooWebhook(req);
-    const payload = req.body;
-    return res.status(200).json({ ok: true, note: 'implement update logic after persisting Shipday order ids' });
-  } catch (error) {
-    console.error('WC update webhook error:', error.response?.data || error.message);
-    return res.status(500).json({ ok: false, error: error.message });
-  }
-});
 
-app.post('/webhooks/shipday/status', async (req, res) => {
-  try {
-    const payload = req.body;
-    await handleShipdayStatus(payload);
-    return res.status(200).json({ ok: true });
-  } catch (error) {
-    console.error('Shipday status webhook error:', error.response?.data || error.message);
-    return res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-app.post('/webhooks/loyverse', async (req, res) => {
-  try {
-    // Keep as stub until your exact Loyverse event payload is confirmed.
-    // Add signature verification here once you create the webhook via Loyverse OAuth/app flow.
-    const payload = req.body;
-    if (!shouldDispatchFromLoyverse(payload)) {
-      return res.status(200).json({ ok: true, skipped: 'not marked for delivery dispatch' });
-    }
-    const shipdayOrder = mapLoyverseReceiptToShipday(payload);
-    const result = await createShipdayOrder(shipdayOrder);
-    return res.status(200).json({ ok: true, shipday: result });
-  } catch (error) {
-    console.error('Loyverse webhook error:', error.response?.data || error.message);
-    return res.status(500).json({ ok: false, error: error.message });
-  }
-});
+// ==============================
+// 🔹 WooCommerce Signature Check
+// ==============================
 function verifyWooWebhook(req) {
   const secret = process.env.WC_WEBHOOK_SECRET;
-  if (!secret) throw new Error('WC_WEBHOOK_SECRET not configured');
-
   const signature = req.get('x-wc-webhook-signature');
 
-  // WooCommerce test/save requests may arrive without signature.
-  // Accept them so the webhook can be saved.
   if (!signature) {
-    console.log('No x-wc-webhook-signature header, skipping verification');
+    console.log('No signature - skipping');
     return true;
   }
 
@@ -97,207 +63,109 @@ function verifyWooWebhook(req) {
     .digest('base64');
 
   if (digest !== signature) {
-    throw new Error('Invalid WooCommerce webhook signature');
+    throw new Error('Invalid signature');
   }
 
   return true;
 }
+
+
+// ==============================
+// 🔹 Check if Delivery Order
+// ==============================
 function isDeliveryOrder(order) {
-  const shippingMethod = (order.shipping_lines || []).map(x => (x.method_title || '').toLowerCase()).join(' ');
-  const meta = (order.meta_data || []).map(x => `${x.key}:${x.value}`.toLowerCase()).join(' | ');
-  return shippingMethod.includes('delivery') || meta.includes('delivery') || !!order.shipping?.address_1;
+  return (order.shipping?.address_1 || '').length > 0;
 }
 
-function mapWooOrderToShipday(order) {
-  const billing = order.billing || {};
-  const shipping = order.shipping || {};
-  const destAddress = compactAddress([
-    shipping.address_1,
-    shipping.address_2,
-    shipping.city,
-    shipping.state,
-    shipping.postcode,
-    shipping.country
-  ]);
 
-  const items = (order.line_items || []).map(item => ({
-    name: item.name,
-    quantity: item.quantity,
-    unitPrice: parseFloat(item.price || 0)
-  }));
-
-  const now = new Date();
-  const pickup = new Date(now.getTime() + 10 * 60000);
-  const delivery = new Date(now.getTime() + Number(process.env.SHIPDAY_DEFAULT_DELIVERY_MINUTES || 45) * 60000);
-
+// ==============================
+// 🔹 Map Woo → Shipday
+// ==============================
+function mapWooOrder(order) {
   return {
     orderNumber: String(order.id),
-    customerName: fullName(shipping.first_name, shipping.last_name) || fullName(billing.first_name, billing.last_name) || 'Customer',
-    customerAddress: destAddress,
-    customerEmail: billing.email || undefined,
-    customerPhoneNumber: billing.phone || undefined,
-    restaurantName: process.env.SHIPDAY_RESTAURANT_NAME,
-    restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS,
-    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE,
-    expectedDeliveryDate: toDateUTC(now),
-    expectedPickupTime: toTimeUTC(pickup),
-    expectedDeliveryTime: toTimeUTC(delivery),
-    pickupLatitude: parseFloatOrUndefined(process.env.SHIPDAY_DEFAULT_PICKUP_LAT),
-    pickupLongitude: parseFloatOrUndefined(process.env.SHIPDAY_DEFAULT_PICKUP_LNG),
-    orderItem: items,
-    tax: parseFloat(order.total_tax || 0),
-    discountAmount: parseFloat(order.discount_total || 0),
-    deliveryFee: parseFloat((order.shipping_lines || []).reduce((sum, x) => sum + parseFloat(x.total || 0), 0)),
-    totalOrderCost: parseFloat(order.total || 0),
-    orderSource: 'WooCommerce',
-    paymentMethod: normalizePaymentMethod(order.payment_method),
-    deliveryInstruction: (order.customer_note || '').slice(0, 250) || undefined,
-    additionalId: String(order.id),
-    isCatering: false
+    customerName: `${order.billing.first_name} ${order.billing.last_name}`,
+    customerAddress: order.shipping.address_1,
+    customerPhoneNumber: order.billing.phone,
+    restaurantName: "FFGR",
+    restaurantAddress: "Addu City, Maldives",
+    orderItem: (order.line_items || []).map(i => ({
+      name: i.name,
+      quantity: i.quantity
+    })),
+    totalOrderCost: parseFloat(order.total)
   };
 }
 
-function shouldDispatchFromLoyverse(payload) {
-  const s = JSON.stringify(payload).toLowerCase();
-  return s.includes('delivery');
-}
 
-function mapLoyverseReceiptToShipday(payload) {
-  // Adjust once you confirm the exact Loyverse webhook payload.
-  return {
-    orderNumber: String(payload.id || payload.receipt_id || Date.now()),
-    customerName: payload.customerName || payload.customer?.name || 'Customer',
-    customerAddress: payload.customerAddress || payload.customer?.address || 'Address not provided',
-    customerPhoneNumber: payload.customerPhoneNumber || payload.customer?.phone_number,
-    restaurantName: process.env.SHIPDAY_RESTAURANT_NAME,
-    restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS,
-    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE,
-    expectedDeliveryDate: toDateUTC(new Date()),
-    expectedPickupTime: toTimeUTC(new Date(Date.now() + 10 * 60000)),
-    expectedDeliveryTime: toTimeUTC(new Date(Date.now() + Number(process.env.SHIPDAY_DEFAULT_DELIVERY_MINUTES || 45) * 60000)),
-    totalOrderCost: 0,
-    orderSource: 'Loyverse',
-    paymentMethod: 'cash'
-  };
-}
-
+// ==============================
+// 🔹 Loyverse → Shipday
+// ==============================
 app.post('/webhooks/loyverse/receipt', async (req, res) => {
   try {
     console.log('Loyverse receipt webhook received');
 
-    const data = req.body;
-    const receipt = data.receipt;
-
+    const receipt = req.body.receipt;
     if (!receipt) return res.status(200).send('No receipt');
 
-    // Only process DELIVERY orders
+    // Only DELIVERY orders
     if (!receipt.note || !receipt.note.toLowerCase().includes('delivery')) {
-      console.log('Not a delivery order, skipping');
+      console.log('Not delivery, skipping');
       return res.status(200).send('Skipped');
     }
 
-    const customerName = receipt.customer?.name || "Customer";
-    const phone = receipt.customer?.phone || "";
-    const address = receipt.note || "No address";
-
-    const items = receipt.line_items.map(item => ({
+    const items = (receipt.line_items || []).map(item => ({
       name: item.item_name,
       quantity: item.quantity,
     }));
 
     const orderData = {
       orderNumber: receipt.receipt_number,
-      customerName: customerName,
-      customerPhoneNumber: phone,
-      customerAddress: address,
+      customerName: receipt.customer?.name || "Customer",
+      customerPhoneNumber: receipt.customer?.phone || "",
+      customerAddress: receipt.note,
       restaurantName: "FFGR",
       restaurantAddress: "Addu City, Maldives",
       orderItem: items,
-      totalOrderCost: receipt.total_money / 100
+      totalOrderCost: parseFloat(receipt.total_money || 0)
     };
 
     console.log('Sending to Shipday:', orderData);
 
-    const response = await fetch('https://api.shipday.com/orders', {
-      method: 'POST',
+    const result = await axios.post(`${SHIPDAY_BASE}/orders`, orderData, {
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': process.env.SHIPDAY_API_KEY
-      },
-      body: JSON.stringify(orderData)
+        'Authorization': `Basic ${process.env.SHIPDAY_API_KEY}`
+      }
     });
 
-    const result = await response.text();
-    console.log('Shipday response:', result);
+    console.log('Shipday response:', result.data);
 
-    return res.status(200).send('Order sent to Shipday');
+    return res.status(200).send('Sent to Shipday');
 
   } catch (err) {
-    console.error('Loyverse webhook error:', err);
+    console.error('Loyverse error:', err.response?.data || err.message);
     return res.status(500).send('Error');
   }
 });
 
 
-async function createShipdayOrder(payload) {
-  const { data } = await axios.post(`${SHIPDAY_BASE}/orders`, payload, {
+// ==============================
+// 🔹 Shipday Order Creator
+// ==============================
+async function createShipdayOrder(data) {
+  const res = await axios.post(`${SHIPDAY_BASE}/orders`, data, {
     headers: {
-      Accept: 'application/json',
-      Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 20000
+      'Authorization': `Basic ${process.env.SHIPDAY_API_KEY}`
+    }
   });
-  return data;
+  return res.data;
 }
 
-async function assignShipdayOrder(orderId, carrierName) {
-  if (!orderId) throw new Error('Cannot assign Shipday order: missing orderId');
-  const payload = { name: carrierName, orderId };
-  const { data } = await axios.post(`${SHIPDAY_BASE}/on-demand/assign`, payload, {
-    headers: {
-      Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 20000
-  });
-  return data;
-}
 
-async function handleShipdayStatus(payload) {
-  console.log('Shipday status event:', JSON.stringify(payload));
-  if (!process.env.ORDER_STATUS_WEBHOOK_URL) return;
-  await axios.post(process.env.ORDER_STATUS_WEBHOOK_URL, payload, { timeout: 10000 });
-}
-
-function normalizePaymentMethod(method) {
-  const m = String(method || '').toLowerCase();
-  if (m.includes('cash')) return 'cash';
-  return 'credit_card';
-}
-
-function compactAddress(parts) {
-  return parts.filter(Boolean).join(', ');
-}
-
-function fullName(first, last) {
-  return [first, last].filter(Boolean).join(' ').trim();
-}
-
-function toDateUTC(date) {
-  return date.toISOString().slice(0, 10);
-}
-
-function toTimeUTC(date) {
-  return date.toISOString().slice(11, 19);
-}
-
-function parseFloatOrUndefined(v) {
-  if (v === undefined || v === null || v === '') return undefined;
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : undefined;
-}
-
+// ==============================
+// 🔹 Start Server
+// ==============================
 app.listen(PORT, () => {
   console.log(`FFGR bridge running on port ${PORT}`);
 });
