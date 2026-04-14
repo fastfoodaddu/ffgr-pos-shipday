@@ -181,6 +181,17 @@ function mapLoyverseReceiptToShipday(payload) {
   };
 }
 
+app.post('/webhooks/loyverse/receipt', async (req, res) => {
+  try {
+    console.log('Loyverse receipt webhook received');
+    console.log(JSON.stringify(req.body, null, 2));
+    return res.status(200).send('OK');
+  } catch (err) {
+    console.error('Loyverse webhook error:', err);
+    return res.status(500).send('Error');
+  }
+});
+
 async function createShipdayOrder(payload) {
   const { data } = await axios.post(`${SHIPDAY_BASE}/orders`, payload, {
     headers: {
