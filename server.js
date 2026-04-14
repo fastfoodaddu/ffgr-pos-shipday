@@ -192,6 +192,36 @@ app.get('/callback', async (req, res) => {
     });
   }
 });
+app.get('/test/shipday', async (_req, res) => {
+  try {
+    const payload = {
+      orderNumber: `TEST-${Date.now()}`,
+      customerName: 'Test Customer',
+      customerPhoneNumber: process.env.SHIPDAY_DEFAULT_PHONE || '7739160',
+      customerAddress: process.env.SHIPDAY_DEFAULT_ADDRESS || 'Hithadhoo',
+      restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
+      restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
+      restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
+      orderItem: [{ name: 'Test Item', quantity: 1 }],
+      totalOrderCost: 1
+    };
+
+    console.log('TEST Shipday payload:', JSON.stringify(payload));
+
+    const result = await sendToShipday(payload);
+
+    console.log('TEST Shipday success:', result);
+    return res.status(200).json({ ok: true, result });
+  } catch (err) {
+    console.error('TEST Shipday failed:', err.response?.data || err.message);
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+      details: err.response?.data || null
+    });
+  }
+});
+
 
 app.get('/auth/loyverse', (_req, res) => {
   const clientId = process.env.LOYVERSE_CLIENT_ID;
