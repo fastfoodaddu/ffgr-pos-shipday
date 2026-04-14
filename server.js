@@ -78,13 +78,18 @@ app.post('/webhooks/loyverse', async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
-
 function verifyWooWebhook(req) {
   const secret = process.env.WC_WEBHOOK_SECRET;
   if (!secret) throw new Error('WC_WEBHOOK_SECRET not configured');
 
   const signature = req.get('x-wc-webhook-signature');
-  if (!signature) throw new Error('Missing x-wc-webhook-signature header');
+
+  // WooCommerce test/save requests may arrive without signature.
+  // Accept them so the webhook can be saved.
+  if (!signature) {
+    console.log('No x-wc-webhook-signature header, skipping verification');
+    return true;
+  }
 
   const digest = crypto
     .createHmac('sha256', secret)
@@ -94,8 +99,9 @@ function verifyWooWebhook(req) {
   if (digest !== signature) {
     throw new Error('Invalid WooCommerce webhook signature');
   }
-}
 
+  return true;
+}
 function isDeliveryOrder(order) {
   const shippingMethod = (order.shipping_lines || []).map(x => (x.method_title || '').toLowerCase()).join(' ');
   const meta = (order.meta_data || []).map(x => `${x.key}:${x.value}`.toLowerCase()).join(' | ');
