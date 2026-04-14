@@ -7,80 +7,72 @@ const app = express();
 app.use(express.json({ verify: rawBodySaver }));
 
 function rawBodySaver(req, res, buf) {
-  if (buf && buf.length) {
-    req.rawBody = buf;
-  }
+  if (buf && buf.length) req.rawBody = buf;
 }
 
 const PORT = process.env.PORT || 8080;
 const SHIPDAY_BASE = 'https://api.shipday.com';
 
+// 🔥 Memory store (avoid duplicates)
+const processedReceipts = new Set();
+
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'ffgr-pos-shipday-bridge' });
+  res.json({ ok: true });
 });
 
 
 // ==============================
-// 🔹 WooCommerce - Order Created
+// 🔹 WooCommerce Order Created
 // ==============================
-app.post('/webhooks/woocommerce/order-updated', async (req, res) => {
+app.post('/webhooks/woocommerce/order-created', async (req, res) => {
   try {
     verifyWooWebhook(req);
 
     const order = req.body;
 
     if (!isDeliveryOrder(order)) {
-      return res.status(200).json({ ok: true, skipped: 'not delivery' });
+      return res.status(200).json({ skipped: true });
     }
 
-    const shipdayOrder = mapWooOrder(order);
-    const result = await createShipdayOrder(shipdayOrder);
+    const data = mapWooOrder(order);
+    await sendToShipday(data);
 
-    return res.status(200).json({ ok: true, shipday: result });
+    return res.status(200).json({ ok: true });
 
   } catch (err) {
-    console.error('WC create error:', err.message);
-    return res.status(500).json({ error: err.message });
+    console.error('WC error:', err.message);
+    return res.status(500).send('Error');
   }
 });
 
 
 // ==============================
-// 🔹 WooCommerce Signature Check
+// 🔹 WooCommerce Signature
 // ==============================
 function verifyWooWebhook(req) {
   const secret = process.env.WC_WEBHOOK_SECRET;
   const signature = req.get('x-wc-webhook-signature');
 
-  if (!signature) {
-    console.log('No signature - skipping');
-    return true;
-  }
+  if (!signature) return true;
 
   const digest = crypto
     .createHmac('sha256', secret)
     .update(req.rawBody)
     .digest('base64');
 
-  if (digest !== signature) {
-    throw new Error('Invalid signature');
-  }
+  if (digest !== signature) throw new Error('Invalid signature');
 
   return true;
 }
 
 
 // ==============================
-// 🔹 Check if Delivery Order
+// 🔹 Woo Mapping
 // ==============================
 function isDeliveryOrder(order) {
   return (order.shipping?.address_1 || '').length > 0;
 }
 
-
-// ==============================
-// 🔹 Map Woo → Shipday
-// ==============================
 function mapWooOrder(order) {
   return {
     orderNumber: String(order.id),
@@ -99,68 +91,82 @@ function mapWooOrder(order) {
 
 
 // ==============================
-// 🔹 Loyverse → Shipday
+// 🔹 Loyverse API Pull
 // ==============================
-app.post('/webhooks/loyverse/receipt', async (req, res) => {
+async function fetchLoyverseOrders() {
   try {
-    console.log('Loyverse receipt webhook received');
+    console.log('Fetching Loyverse receipts...');
 
-    const receipt = req.body.receipt;
-    if (!receipt) return res.status(200).send('No receipt');
+    const res = await axios.get(
+      'https://api.loyverse.com/v1.0/receipts',
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.LOYVERSE_API_KEY}`
+        }
+      }
+    );
 
-    // Only DELIVERY orders
-    if (!receipt.note || !receipt.note.toLowerCase().includes('delivery')) {
-      console.log('Not delivery, skipping');
-      return res.status(200).send('Skipped');
+    const receipts = res.data.receipts || [];
+
+    for (const receipt of receipts) {
+
+      // ❌ Skip duplicates
+      if (processedReceipts.has(receipt.id)) continue;
+
+      // Only DELIVERY orders
+      if (!receipt.note || !receipt.note.toLowerCase().includes('delivery')) continue;
+
+      console.log('Processing receipt:', receipt.receipt_number);
+
+      const items = (receipt.line_items || []).map(item => ({
+        name: item.item_name,
+        quantity: item.quantity,
+      }));
+
+      const orderData = {
+        orderNumber: receipt.receipt_number,
+        customerName: receipt.customer?.name || "Customer",
+        customerPhoneNumber: receipt.customer?.phone_number || "",
+        customerAddress: receipt.note,
+        restaurantName: "FFGR",
+        restaurantAddress: "Addu City, Maldives",
+        orderItem: items,
+        totalOrderCost: parseFloat(receipt.total_money || 0)
+      };
+
+      await sendToShipday(orderData);
+
+      processedReceipts.add(receipt.id);
+
+      console.log('Sent to Shipday:', receipt.receipt_number);
     }
 
-    const items = (receipt.line_items || []).map(item => ({
-      name: item.item_name,
-      quantity: item.quantity,
-    }));
-
-    const orderData = {
-      orderNumber: receipt.receipt_number,
-      customerName: receipt.customer?.name || "Customer",
-      customerPhoneNumber: receipt.customer?.phone || "",
-      customerAddress: receipt.note,
-      restaurantName: "FFGR",
-      restaurantAddress: "Addu City, Maldives",
-      orderItem: items,
-      totalOrderCost: parseFloat(receipt.total_money || 0)
-    };
-
-    console.log('Sending to Shipday:', orderData);
-
-    const result = await axios.post(`${SHIPDAY_BASE}/orders`, orderData, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Basic ${process.env.SHIPDAY_API_KEY}`
-      }
-    });
-
-    console.log('Shipday response:', result.data);
-
-    return res.status(200).send('Sent to Shipday');
-
   } catch (err) {
-    console.error('Loyverse error:', err.response?.data || err.message);
-    return res.status(500).send('Error');
+    console.error('Loyverse API error:', err.response?.data || err.message);
   }
-});
+}
 
 
 // ==============================
-// 🔹 Shipday Order Creator
+// 🔹 Send to Shipday
 // ==============================
-async function createShipdayOrder(data) {
+async function sendToShipday(data) {
   const res = await axios.post(`${SHIPDAY_BASE}/orders`, data, {
     headers: {
+      'Content-Type': 'application/json',
       'Authorization': `Basic ${process.env.SHIPDAY_API_KEY}`
     }
   });
+
+  console.log('Shipday response:', res.data);
   return res.data;
 }
+
+
+// ==============================
+// 🔹 AUTO RUN (every 60 sec)
+// ==============================
+setInterval(fetchLoyverseOrders, 60000);
 
 
 // ==============================
