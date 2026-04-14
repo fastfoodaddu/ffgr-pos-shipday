@@ -72,7 +72,7 @@ function verifyWooWebhook(req) {
 
   const signature = req.get('x-wc-webhook-signature');
 
-  // Woo save/test requests may arrive without signature
+  // Woo test/save requests may arrive without signature
   if (!signature) {
     console.log('No WooCommerce signature header, skipping verification');
     return true;
@@ -115,10 +115,10 @@ function mapWooOrderToShipday(order) {
     orderNumber: String(order.id),
     customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ') || 'Customer',
     customerAddress: customerAddress || 'Address not provided',
-    customerPhoneNumber: billing.phone || '',
+    customerPhoneNumber: billing.phone || process.env.SHIPDAY_DEFAULT_PHONE || '7739160',
     restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
     restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
-    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '',
+    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
     orderItem: (order.line_items || []).map(i => ({
       name: i.name || 'Item',
       quantity: Number(i.quantity || 1)
@@ -138,7 +138,6 @@ app.get('/callback', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing code' });
     }
 
-    // Optional state check
     if (process.env.LOYVERSE_OAUTH_STATE && state !== process.env.LOYVERSE_OAUTH_STATE) {
       return res.status(400).json({ ok: false, error: 'Invalid state' });
     }
@@ -163,7 +162,6 @@ app.get('/callback', async (req, res) => {
 
     console.log('Loyverse OAuth token response:', tokenRes.data);
 
-    // Return token JSON so you can copy access_token and refresh_token
     return res.status(200).json({
       ok: true,
       message: 'Copy access_token into LOYVERSE_API_KEY and refresh_token into LOYVERSE_REFRESH_TOKEN',
@@ -183,7 +181,9 @@ app.get('/auth/loyverse', (_req, res) => {
   const clientId = process.env.LOYVERSE_CLIENT_ID;
   const redirectUri = process.env.LOYVERSE_REDIRECT_URI;
   const state = process.env.LOYVERSE_OAUTH_STATE || 'ffgr123';
-  const scope = encodeURIComponent(process.env.LOYVERSE_SCOPE || 'RECEIPTS_READ STORES_READ MERCHANT_READ');
+  const scope = encodeURIComponent(
+    process.env.LOYVERSE_SCOPE || 'RECEIPTS_READ STORES_READ MERCHANT_READ'
+  );
 
   if (!clientId || !redirectUri) {
     return res.status(500).send('LOYVERSE_CLIENT_ID or LOYVERSE_REDIRECT_URI not configured');
@@ -384,7 +384,7 @@ async function pollLoyverseAndSend() {
 // Shipday
 // -----------------------------
 async function sendToShipday(payload) {
-  const { data } = await axios.post('https://api.shipday.com/orders', payload, {
+  const { data } = await axios.post(`${SHIPDAY_BASE}/orders`, payload, {
     headers: {
       Accept: 'application/json',
       Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
@@ -393,19 +393,6 @@ async function sendToShipday(payload) {
     timeout: 20000
   });
 
-  return data;
-}
-
-// -----------------------------
-// Start + scheduler
-// -----------------------------
-app.listen(PORT, () => {
-  console.log(`FFGR bridge running on port ${PORT}`);
-});
-
-// Start polling shortly after boot, then every minute
-setTimeout(pollLoyverseAndSend, 5000);
-setInterval(pollLoyverseAndSend, POLL_INTERVAL_MS);
   return data;
 }
 
