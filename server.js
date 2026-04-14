@@ -327,9 +327,9 @@ async function pollLoyverseAndSend() {
         .join(' ')
         .trim();
 
-      // FFGR rule: only receipts marked DELIVERY go to Shipday
-      if (!noteText.toLowerCase().includes('delivery')) {
-        console.log(`Skipping non-delivery receipt ${receipt.receipt_number || receipt.id}`);
+      // Treat any receipt with a note/address as delivery
+      if (!noteText) {
+        console.log(`Skipping receipt ${receipt.receipt_number || receipt.id} - no address/note`);
         continue;
       }
 
@@ -342,7 +342,8 @@ async function pollLoyverseAndSend() {
         receipt.customer?.phone_number ||
         receipt.customer?.phone ||
         receipt.phone_number ||
-        '';
+        process.env.SHIPDAY_DEFAULT_PHONE ||
+        '7739160';
 
       const items = (receipt.line_items || []).map(item => ({
         name: item.item_name || item.name || item.item?.item_name || 'Item',
@@ -353,20 +354,26 @@ async function pollLoyverseAndSend() {
         orderNumber: String(receipt.receipt_number || receipt.id),
         customerName,
         customerPhoneNumber: customerPhone,
-        customerAddress: noteText || 'Address not provided',
+        customerAddress: noteText,
         restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
         restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS || 'Addu City, Maldives',
-        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '',
+        restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE || '+9607739160',
         orderItem: items,
         totalOrderCost: parseFloat(receipt.total_money || 0)
       };
 
-      console.log('Sending to Shipday:', JSON.stringify(shipdayOrder));
+      console.log('About to send to Shipday:', JSON.stringify(shipdayOrder));
 
-      const result = await sendToShipday(shipdayOrder);
-      processedReceipts.add(receipt.id);
-
-      console.log(`Sent receipt ${receipt.receipt_number || receipt.id} to Shipday`, result);
+      try {
+        const result = await sendToShipday(shipdayOrder);
+        processedReceipts.add(receipt.id);
+        console.log(`Sent receipt ${receipt.receipt_number || receipt.id} to Shipday`, result);
+      } catch (shipErr) {
+        console.error(
+          `Shipday send failed for receipt ${receipt.receipt_number || receipt.id}:`,
+          shipErr.response?.data || shipErr.message
+        );
+      }
     }
   } catch (err) {
     console.error('Loyverse poll error:', err.response?.data || err.message);
@@ -377,12 +384,17 @@ async function pollLoyverseAndSend() {
 // Shipday
 // -----------------------------
 async function sendToShipday(payload) {
-  const { data } = await axios.post(`${SHIPDAY_BASE}/orders`, payload, {
+  const { data } = await axios.post('https://api.shipday.com/orders', payload, {
     headers: {
       Accept: 'application/json',
       Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
       'Content-Type': 'application/json'
     },
+    timeout: 20000
+  });
+
+  return data;
+}
     timeout: 20000
   });
 
