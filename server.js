@@ -23,7 +23,7 @@ app.get('/health', (_req, res) => {
 // ==============================
 // 🔹 WooCommerce - Order Created
 // ==============================
-app.post('/webhooks/woocommerce/order-created', async (req, res) => {
+app.post('/webhooks/woocommerce/order-updated', async (req, res) => {
   try {
     verifyWooWebhook(req);
 
