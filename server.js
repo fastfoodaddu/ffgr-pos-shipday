@@ -404,5 +404,17 @@ app.listen(PORT, () => {
 });
 
 // Start polling shortly after boot, then every minute
-setTimeout(pollLoyverseAndSend, 5000);
-setInterval(pollLoyverseAndSend, POLL_INTERVAL_MS);
+function startPolling() {
+  console.log('Starting Loyverse polling...');
+
+  setInterval(async () => {
+    try {
+      await pollLoyverseAndSend();
+    } catch (err) {
+      console.error('Polling loop error:', err);
+    }
+  }, POLL_INTERVAL_MS);
+}
+
+// start after server boots
+setTimeout(startPolling, 10000);
