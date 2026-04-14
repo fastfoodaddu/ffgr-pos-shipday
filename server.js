@@ -1,4 +1,5 @@
 require('dotenv').config();
+console.log('FFGR BUILD: shipday-debug-v3');
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
