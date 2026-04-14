@@ -184,13 +184,60 @@ function mapLoyverseReceiptToShipday(payload) {
 app.post('/webhooks/loyverse/receipt', async (req, res) => {
   try {
     console.log('Loyverse receipt webhook received');
-    console.log(JSON.stringify(req.body, null, 2));
-    return res.status(200).send('OK');
+
+    const data = req.body;
+    const receipt = data.receipt;
+
+    if (!receipt) return res.status(200).send('No receipt');
+
+    // Only process DELIVERY orders
+    if (!receipt.note || !receipt.note.toLowerCase().includes('delivery')) {
+      console.log('Not a delivery order, skipping');
+      return res.status(200).send('Skipped');
+    }
+
+    const customerName = receipt.customer?.name || "Customer";
+    const phone = receipt.customer?.phone || "";
+    const address = receipt.note || "No address";
+
+    const items = receipt.line_items.map(item => ({
+      name: item.item_name,
+      quantity: item.quantity,
+    }));
+
+    const orderData = {
+      orderNumber: receipt.receipt_number,
+      customerName: customerName,
+      customerPhoneNumber: phone,
+      customerAddress: address,
+      restaurantName: "FFGR",
+      restaurantAddress: "Addu City, Maldives",
+      orderItem: items,
+      totalOrderCost: receipt.total_money / 100
+    };
+
+    console.log('Sending to Shipday:', orderData);
+
+    const response = await fetch('https://api.shipday.com/orders', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': process.env.SHIPDAY_API_KEY
+      },
+      body: JSON.stringify(orderData)
+    });
+
+    const result = await response.text();
+    console.log('Shipday response:', result);
+
+    return res.status(200).send('Order sent to Shipday');
+
   } catch (err) {
     console.error('Loyverse webhook error:', err);
     return res.status(500).send('Error');
   }
 });
+
 
 async function createShipdayOrder(payload) {
   const { data } = await axios.post(`${SHIPDAY_BASE}/orders`, payload, {
