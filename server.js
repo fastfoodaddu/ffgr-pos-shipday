@@ -36,73 +36,97 @@ function getClientBillIdFromTask(task) {
     task?.bill?.id ||
     task?.data?.client_bill_id ||
     task?.meta?.client_bill_id ||
+    task?.clientBillId ||
     null
   );
 }
 
 function mapEwityBillToShipdayPayload(billResponse) {
-  const bill = billResponse?.bill || billResponse?.data?.bill || billResponse?.data || billResponse;
+  const raw =
+    billResponse?.data?.bill ||
+    billResponse?.bill ||
+    billResponse?.data ||
+    billResponse;
 
-  const customer = bill?.customer || {};
-  const table = bill?.table || {};
-  const lines = Array.isArray(bill?.bill_lines) ? bill.bill_lines : [];
+  const bill = raw || {};
+  const customer = bill.customer || {};
+  const table = bill.table || {};
+  const lines = Array.isArray(bill.bill_lines) ? bill.bill_lines : [];
 
   const customerName =
-    customer?.name ||
-    customer?.full_name ||
-    customer?.display_name ||
+    customer.name ||
+    customer.full_name ||
+    customer.display_name ||
+    customer.customer_name ||
     "FFGR Customer";
 
-  const customerPhone =
-    customer?.mobile ||
-    customer?.phone ||
-    customer?.contact ||
-    customer?.telephone ||
+  const customerPhoneNumber =
+    customer.mobile ||
+    customer.phone ||
+    customer.contact ||
+    customer.telephone ||
+    customer.whatsapp ||
     "";
 
   const customerAddress =
-    customer?.address ||
-    customer?.street ||
-    customer?.full_address ||
-    table?.name_text ||
+    customer.address ||
+    customer.full_address ||
+    customer.street ||
+    customer.location ||
+    table.name_text ||
     "Address not provided";
 
   const orderNumber =
-    bill?.invoice_number ||
-    bill?.temp_number ||
-    bill?.number ||
-    bill?.id;
+    bill.invoice_number ||
+    bill.temp_number ||
+    bill.number ||
+    bill.id ||
+    "";
 
-  const totalOrderCost =
-    Number(bill?.total ?? 0);
+  const totalOrderCost = Number(bill.total ?? 0);
 
   const orderItems = lines.map((line) => ({
     name:
-      line?.name ||
-      line?.product_name ||
-      line?.item_name ||
+      line.name ||
+      line.product_name ||
+      line.item_name ||
+      line.title ||
       "Item",
-    unitPrice:
-      Number(line?.sales_price ?? line?.price ?? line?.unit_price ?? 0),
-    quantity:
-      Number(line?.quantity ?? line?.qty ?? 1),
+    unitPrice: Number(
+      line.sales_price ??
+      line.price ??
+      line.unit_price ??
+      line.amount ??
+      0
+    ),
+    quantity: Number(line.quantity ?? line.qty ?? 1),
     addOns: [],
   }));
 
-  return {
-    orderNumber: String(orderNumber || ""),
-    customerName: String(customerName || ""),
-    customerAddress: String(customerAddress || ""),
-    customerPhoneNumber: String(customerPhone || ""),
-    restaurantName: "FFGR",
+  const payload = {
+    orderNumber: String(orderNumber),
+    customerName: String(customerName),
+    customerAddress: String(customerAddress),
+    customerPhoneNumber: String(customerPhoneNumber),
+    restaurantName: process.env.RESTAURANT_NAME || "FFGR",
     totalOrderCost,
     expectedPickupTime: new Date().toISOString(),
-    pickupAddress: process.env.FFGR_PICKUP_ADDRESS || "Fast Food Gourmet Restaurant, Hithadhoo, Addu City",
-    pickupLatitude: process.env.FFGR_PICKUP_LAT ? Number(process.env.FFGR_PICKUP_LAT) : undefined,
-    pickupLongitude: process.env.FFGR_PICKUP_LNG ? Number(process.env.FFGR_PICKUP_LNG) : undefined,
+    pickupAddress:
+      process.env.FFGR_PICKUP_ADDRESS ||
+      "Fast Food Gourmet Restaurant, Hithadhoo, Addu City",
     orderItems,
-    notes: `Ewity Bill ID: ${bill?.id || ""}`,
+    notes: `Ewity Bill ID: ${bill.id || ""}`,
   };
+
+  if (process.env.FFGR_PICKUP_LAT) {
+    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
+  }
+
+  if (process.env.FFGR_PICKUP_LNG) {
+    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
+  }
+
+  return payload;
 }
 
 async function fetchEwityTasks(limit = 5) {
@@ -119,7 +143,9 @@ async function fetchEwityBill(clientBillId) {
   const response = await axios.post(
     `${EWITY_BASE}/ebills/dr3-bill`,
     { client_bill_id: clientBillId },
-    { headers: ewityHeaders() }
+    {
+      headers: ewityHeaders(),
+    }
   );
   return response.data;
 }
@@ -161,9 +187,39 @@ app.get("/test-ewity-orders", async (req, res) => {
   }
 });
 
+app.get("/ewity-orders", async (req, res) => {
+  try {
+    const data = await fetchEwityTasks(5);
+    res.json(data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
 app.post("/test-ewity-bill", async (req, res) => {
   try {
     const { client_bill_id } = req.body;
+
+    if (!client_bill_id) {
+      return res.status(400).json({ error: "client_bill_id is required" });
+    }
+
+    const data = await fetchEwityBill(client_bill_id);
+    res.json(data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
+app.get("/test-ewity-bill-get", async (req, res) => {
+  try {
+    const client_bill_id = req.query.client_bill_id;
 
     if (!client_bill_id) {
       return res.status(400).json({ error: "client_bill_id is required" });
@@ -191,9 +247,9 @@ app.get("/sync-ewity", async (req, res) => {
 
       if (!clientBillId) {
         results.push({
-          task,
           skipped: true,
           reason: "client_bill_id not found in task",
+          task,
         });
         continue;
       }
@@ -202,7 +258,7 @@ app.get("/sync-ewity", async (req, res) => {
 
       results.push({
         client_bill_id: clientBillId,
-        bill: billData,
+        billData,
       });
     }
 
@@ -222,6 +278,33 @@ app.get("/sync-ewity", async (req, res) => {
 app.post("/sync-one-to-shipday", async (req, res) => {
   try {
     const { client_bill_id } = req.body;
+
+    if (!client_bill_id) {
+      return res.status(400).json({ error: "client_bill_id is required" });
+    }
+
+    const billData = await fetchEwityBill(client_bill_id);
+    const shipdayPayload = mapEwityBillToShipdayPayload(billData);
+    const shipdayResponse = await sendToShipday(shipdayPayload);
+
+    res.json({
+      success: true,
+      client_bill_id,
+      billData,
+      shipdayPayload,
+      shipdayResponse,
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
+app.get("/sync-one-to-shipday-get", async (req, res) => {
+  try {
+    const client_bill_id = req.query.client_bill_id;
 
     if (!client_bill_id) {
       return res.status(400).json({ error: "client_bill_id is required" });
