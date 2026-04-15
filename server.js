@@ -8,7 +8,6 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
-
 const EWITY_BASE = "https://app.ewitypos.com/api/v1";
 const EWITY_BEARER = process.env.EWITY_BEARER || "";
 const SHIPDAY_API_KEY = process.env.SHIPDAY_API_KEY || "";
@@ -43,9 +42,7 @@ function extractPublicBillId(dr3Response) {
   try {
     const u = new URL(url);
     const parts = u.pathname.split("/").filter(Boolean);
-    if (parts.length >= 2 && parts[0] === "b") {
-      return parts[1];
-    }
+    if (parts[0] === "b" && parts[1]) return parts[1];
     return null;
   } catch {
     return null;
@@ -62,13 +59,29 @@ async function fetchEwityDr3Bill(clientBillId) {
 }
 
 async function fetchEwityPublicBillJson(publicId) {
-  const response = await axios.get(
-    `https://my.ewity.com/b/${encodeURIComponent(publicId)}?_data=routes/b/$id`,
-    {
-      headers: { Accept: "application/json" },
-      timeout: 20000,
-    }
-  );
+  const publicPageUrl = `https://my.ewity.com/b/${encodeURIComponent(publicId)}`;
+
+  const response = await axios.get(publicPageUrl, {
+    params: {
+      _data: "routes/b/$id",
+    },
+    headers: {
+      Accept: "application/json",
+      Referer: publicPageUrl,
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    timeout: 20000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `Public bill JSON failed with status ${response.status}: ${JSON.stringify(response.data)}`
+    );
+  }
+
   return response.data;
 }
 
@@ -79,13 +92,8 @@ function mapPublicBillToShipday(publicBillJson) {
   const totalParts = Array.isArray(bill?.total_parts) ? bill.total_parts : [];
   const lines = Array.isArray(bill?.bill_lines) ? bill.bill_lines : [];
 
-  const headerMap = Object.fromEntries(
-    headerParts.map((part) => [part.key, part.value])
-  );
-
-  const totalMap = Object.fromEntries(
-    totalParts.map((part) => [part.key, part.value])
-  );
+  const headerMap = Object.fromEntries(headerParts.map((p) => [p.key, p.value]));
+  const totalMap = Object.fromEntries(totalParts.map((p) => [p.key, p.value]));
 
   const orderItems = lines.map((line) => ({
     name: line?.variant?.name || "Item",
@@ -94,10 +102,7 @@ function mapPublicBillToShipday(publicBillJson) {
     addOns: [],
   }));
 
-  const totalOrderCost =
-    parseMoney(totalMap["Total"]) || parseMoney(bill?.total_text);
-
-  const payload = {
+  return {
     orderNumber:
       headerMap["Bill Number"] ||
       bill?.number ||
@@ -105,10 +110,9 @@ function mapPublicBillToShipday(publicBillJson) {
       "",
     customerName: customer?.name || "FFGR Customer",
     customerPhoneNumber: customer?.mobile || "",
-    customerAddress:
-      process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
+    customerAddress: process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
     restaurantName: process.env.RESTAURANT_NAME || "FFGR",
-    totalOrderCost,
+    totalOrderCost: parseMoney(totalMap["Total"] || bill?.total_text),
     expectedPickupTime: new Date().toISOString(),
     pickupAddress:
       process.env.FFGR_PICKUP_ADDRESS ||
@@ -123,16 +127,6 @@ function mapPublicBillToShipday(publicBillJson) {
       .filter(Boolean)
       .join(" | "),
   };
-
-  if (process.env.FFGR_PICKUP_LAT) {
-    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
-  }
-
-  if (process.env.FFGR_PICKUP_LNG) {
-    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
-  }
-
-  return payload;
 }
 
 async function sendToShipday(payload) {
@@ -171,10 +165,10 @@ app.get("/test-ewity-public-bill", async (req, res) => {
     const data = await fetchEwityPublicBillJson(id);
     res.json(data);
   } catch (err) {
-    console.error("test-ewity-public-bill error:", err.response?.data || err.message);
-    res.status(err.response?.status || 500).json({
+    console.error("test-ewity-public-bill error:", err.message);
+    res.status(500).json({
       success: false,
-      error: err.response?.data || err.message,
+      error: err.message,
     });
   }
 });
@@ -207,10 +201,10 @@ app.get("/test-ewity-bill-from-client", async (req, res) => {
       publicBill,
     });
   } catch (err) {
-    console.error("test-ewity-bill-from-client error:", err.response?.data || err.message);
-    res.status(err.response?.status || 500).json({
+    console.error("test-ewity-bill-from-client error:", err.message);
+    res.status(500).json({
       success: false,
-      error: err.response?.data || err.message,
+      error: err.message,
     });
   }
 });
@@ -231,10 +225,10 @@ app.get("/test-shipday-payload", async (req, res) => {
       shipdayPayload,
     });
   } catch (err) {
-    console.error("test-shipday-payload error:", err.response?.data || err.message);
-    res.status(err.response?.status || 500).json({
+    console.error("test-shipday-payload error:", err.message);
+    res.status(500).json({
       success: false,
-      error: err.response?.data || err.message,
+      error: err.message,
     });
   }
 });
@@ -257,10 +251,10 @@ app.get("/send-public-bill-to-shipday", async (req, res) => {
       shipdayResponse,
     });
   } catch (err) {
-    console.error("send-public-bill-to-shipday error:", err.response?.data || err.message);
-    res.status(err.response?.status || 500).json({
+    console.error("send-public-bill-to-shipday error:", err.message);
+    res.status(500).json({
       success: false,
-      error: err.response?.data || err.message,
+      error: err.message,
     });
   }
 });
