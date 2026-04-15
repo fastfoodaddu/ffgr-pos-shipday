@@ -5,21 +5,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
-const EWITY_BASE = "https://app.ewitypos.com/api/v1";
-const EWITY_BEARER = process.env.EWITY_BEARER || "";
 const SHIPDAY_API_KEY = process.env.SHIPDAY_API_KEY || "";
-
-function ewityHeaders(extra = {}) {
-  return {
-    Authorization: `Bearer ${EWITY_BEARER}`,
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    ...extra,
-  };
-}
 
 function shipdayHeaders() {
   return {
@@ -33,56 +22,6 @@ function parseMoney(text) {
   if (text == null) return 0;
   const cleaned = String(text).replace(/[^0-9.-]/g, "");
   return Number(cleaned || 0);
-}
-
-function extractPublicBillId(dr3Response) {
-  const url = dr3Response?.data?.url || dr3Response?.url || "";
-  if (!url) return null;
-
-  try {
-    const u = new URL(url);
-    const parts = u.pathname.split("/").filter(Boolean);
-    if (parts[0] === "b" && parts[1]) return parts[1];
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchEwityDr3Bill(clientBillId) {
-  const response = await axios.post(
-    `${EWITY_BASE}/ebills/dr3-bill`,
-    { client_bill_id: clientBillId },
-    { headers: ewityHeaders(), timeout: 20000 }
-  );
-  return response.data;
-}
-
-async function fetchEwityPublicBillJson(publicId) {
-  const publicPageUrl = `https://my.ewity.com/b/${encodeURIComponent(publicId)}`;
-
-  const response = await axios.get(publicPageUrl, {
-    params: {
-      _data: "routes/b/$id",
-    },
-    headers: {
-      Accept: "application/json",
-      Referer: publicPageUrl,
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-      "X-Requested-With": "XMLHttpRequest",
-    },
-    timeout: 20000,
-    validateStatus: () => true,
-  });
-
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(
-      `Public bill JSON failed with status ${response.status}: ${JSON.stringify(response.data)}`
-    );
-  }
-
-  return response.data;
 }
 
 function mapPublicBillToShipday(publicBillJson) {
@@ -102,7 +41,7 @@ function mapPublicBillToShipday(publicBillJson) {
     addOns: [],
   }));
 
-  return {
+  const payload = {
     orderNumber:
       headerMap["Bill Number"] ||
       bill?.number ||
@@ -122,11 +61,19 @@ function mapPublicBillToShipday(publicBillJson) {
       `Ewity Public Bill ID: ${publicBillJson?.id || ""}`,
       `Ewity Client Bill ID: ${bill?.client_bill_id || ""}`,
       `Payment Status: ${headerMap["Payment Status"] || bill?.payment_status || ""}`,
-      `Date: ${headerMap["Date"] || ""}`,
-    ]
-      .filter(Boolean)
-      .join(" | "),
+      `Date: ${headerMap["Date"] || ""}`
+    ].filter(Boolean).join(" | "),
   };
+
+  if (process.env.FFGR_PICKUP_LAT) {
+    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
+  }
+
+  if (process.env.FFGR_PICKUP_LNG) {
+    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
+  }
+
+  return payload;
 }
 
 async function sendToShipday(payload) {
@@ -149,83 +96,23 @@ async function sendToShipday(payload) {
 app.get("/", (req, res) => {
   res.json({
     status: "running",
-    service: "ewity-shipday-bridge",
-    ewity_bearer: EWITY_BEARER ? "available" : "missing",
+    service: "ewity-browser-json-to-shipday",
     shipday_api_key: SHIPDAY_API_KEY ? "available" : "missing",
   });
 });
 
-app.get("/test-ewity-public-bill", async (req, res) => {
+app.post("/test-public-bill-json", (req, res) => {
   try {
-    const id = req.query.id;
-    if (!id) {
-      return res.status(400).json({ error: "id is required" });
-    }
-
-    const data = await fetchEwityPublicBillJson(id);
-    res.json(data);
-  } catch (err) {
-    console.error("test-ewity-public-bill error:", err.message);
-    res.status(500).json({
-      success: false,
-      error: err.message,
-    });
-  }
-});
-
-app.get("/test-ewity-bill-from-client", async (req, res) => {
-  try {
-    const client_bill_id = req.query.client_bill_id;
-    if (!client_bill_id) {
-      return res.status(400).json({ error: "client_bill_id is required" });
-    }
-
-    const dr3 = await fetchEwityDr3Bill(client_bill_id);
-    const publicId = extractPublicBillId(dr3);
-
-    if (!publicId) {
-      return res.status(500).json({
-        success: false,
-        error: "Could not extract public bill ID from dr3 response",
-        dr3,
-      });
-    }
-
-    const publicBill = await fetchEwityPublicBillJson(publicId);
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
 
     res.json({
       success: true,
-      client_bill_id,
-      publicId,
-      dr3,
-      publicBill,
-    });
-  } catch (err) {
-    console.error("test-ewity-bill-from-client error:", err.message);
-    res.status(500).json({
-      success: false,
-      error: err.message,
-    });
-  }
-});
-
-app.get("/test-shipday-payload", async (req, res) => {
-  try {
-    const id = req.query.id;
-    if (!id) {
-      return res.status(400).json({ error: "id is required" });
-    }
-
-    const publicBill = await fetchEwityPublicBillJson(id);
-    const shipdayPayload = mapPublicBillToShipday(publicBill);
-
-    res.json({
-      success: true,
-      publicBill,
+      received: publicBillJson,
       shipdayPayload,
     });
   } catch (err) {
-    console.error("test-shipday-payload error:", err.message);
+    console.error("test-public-bill-json error:", err.message);
     res.status(500).json({
       success: false,
       error: err.message,
@@ -233,28 +120,22 @@ app.get("/test-shipday-payload", async (req, res) => {
   }
 });
 
-app.get("/send-public-bill-to-shipday", async (req, res) => {
+app.post("/send-public-bill-json-to-shipday", async (req, res) => {
   try {
-    const id = req.query.id;
-    if (!id) {
-      return res.status(400).json({ error: "id is required" });
-    }
-
-    const publicBill = await fetchEwityPublicBillJson(id);
-    const shipdayPayload = mapPublicBillToShipday(publicBill);
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
     const shipdayResponse = await sendToShipday(shipdayPayload);
 
     res.json({
       success: true,
-      publicBill,
       shipdayPayload,
       shipdayResponse,
     });
   } catch (err) {
-    console.error("send-public-bill-to-shipday error:", err.message);
-    res.status(500).json({
+    console.error("send-public-bill-json-to-shipday error:", err.response?.data || err.message);
+    res.status(err.response?.status || 500).json({
       success: false,
-      error: err.message,
+      error: err.response?.data || err.message,
     });
   }
 });
