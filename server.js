@@ -23,7 +23,33 @@ app.get("/", (req, res) => {
     token: TOKEN ? "available" : "missing"
   });
 });
+app.post("/get-ewity-bill", async (req, res) => {
+  try {
+    const { client_bill_id } = req.body;
 
+    const response = await axios.post(
+      "https://app.ewitypos.com/api/v1/ebills/dr3-bill",
+      {
+        client_bill_id
+      },
+      {
+        headers: {
+          // ⚠️ THIS IS IMPORTANT → you must copy from browser
+          Authorization: req.headers.authorization || "",
+          Cookie: req.headers.cookie || "",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    res.json(response.data);
+
+  } catch (err) {
+    res.status(err.response?.status || 500).json(
+      err.response?.data || { error: err.message }
+    );
+  }
+});
 app.get("/test-ewity", async (req, res) => {
   try {
     const r = await axios.get(`${BASE}/v1/ui/payment-types`, { headers });
