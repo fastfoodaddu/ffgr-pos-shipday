@@ -3,7 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 
-console.log('FFGR BUILD: ticket-created-fast-safe-v1');
+console.log('FFGR BUILD: stable-polling-v1');
 
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err);
@@ -31,9 +31,9 @@ const LOYVERSE_RECONCILE_INTERVAL_MS = Number(
   process.env.LOYVERSE_RECONCILE_INTERVAL_MS || 900000
 ); // 15 min
 
-// in-memory tracking
 const sentKeys = new Set();
 const failedQueue = new Map();
+
 let lastPollIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 let lastReconcileIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
@@ -44,7 +44,7 @@ app.get('/', (_req, res) => {
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    build: 'ticket-created-fast-safe-v1',
+    build: 'stable-polling-v1',
     loyversePollMs: LOYVERSE_POLL_INTERVAL_MS,
     loyverseReconcileMs: LOYVERSE_RECONCILE_INTERVAL_MS,
   });
@@ -173,8 +173,8 @@ function mapWooOrderToShipday(order) {
     process.env.SHIPDAY_DEFAULT_ADDRESS ||
     'Hithadhoo';
 
-  const note = String(order.customer_note || '').trim();
-  const customerNameRaw =
+  const note = order.customer_note || process.env.SHIPDAY_DEFAULT_NOTE || '';
+  const customerName =
     [billing.first_name, billing.last_name].filter(Boolean).join(' ') ||
     process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME ||
     'Customer';
@@ -183,7 +183,7 @@ function mapWooOrderToShipday(order) {
 
   return {
     orderNumber: String(order.id || Date.now()),
-    customerName: `${customerNameRaw} - ${customerPhone}`,
+    customerName: `${customerName} - ${customerPhone}`,
     customerPhoneNumber: customerPhone,
     customerAddress: formatAddressLine(baseAddress, note),
     deliveryInstruction: note,
@@ -330,53 +330,11 @@ app.post('/auth/loyverse/refresh', async (_req, res) => {
 });
 
 // -----------------------------
-// Loyverse direct webhook (primary)
-// -----------------------------
-app.get('/webhooks/loyverse/receipt', (_req, res) => {
-  res.status(200).send('Loyverse webhook endpoint is live. Use POST.');
-});
-
-app.post('/webhooks/loyverse/receipt', async (req, res) => {
-  try {
-    console.log('LOYVERSE WEBHOOK RAW:', JSON.stringify(req.body));
-
-    const receipts = extractLoyverseReceiptsFromWebhook(req.body);
-
-    if (!receipts.length) {
-      return res.status(200).json({ ok: true, skipped: 'no receipts found' });
-    }
-
-    for (const receipt of receipts) {
-      const receiptId = getReceiptId(receipt);
-      if (!receiptId) {
-        console.log('Skipping receipt with no usable id:', JSON.stringify(receipt));
-        continue;
-      }
-
-      const payload = mapLoyverseReceiptToShipday(receipt);
-      const key = `loyverse-webhook-${payload.orderNumber}`;
-
-      console.log('LOYVERSE WEBHOOK -> SHIPDAY:', JSON.stringify(payload));
-      await safeDispatchToShipday(key, payload, 'loyverse-webhook');
-    }
-
-    return res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error('LOYVERSE WEBHOOK ERROR:', err.response?.data || err.message);
-    return res.status(500).json({
-      ok: false,
-      error: err.message,
-      details: err.response?.data || null,
-    });
-  }
-});
-
-// -----------------------------
-// Loyverse reconcile (backup)
+// Loyverse polling for ticket creation
 // -----------------------------
 app.get('/debug/loyverse', async (_req, res) => {
   try {
-    const data = await fetchLoyverseReceipts({ debug: true });
+    const data = await fetchLoyverseReceipts({ debug: true, since: lastPollIso });
     return res.json({ ok: true, ...data });
   } catch (err) {
     return res.status(500).json({
@@ -387,7 +345,7 @@ app.get('/debug/loyverse', async (_req, res) => {
   }
 });
 
-async function fetchLoyverseReceipts({ debug = false } = {}) {
+async function fetchLoyverseReceipts({ debug = false, since } = {}) {
   if (!process.env.LOYVERSE_API_KEY) {
     throw new Error('LOYVERSE_API_KEY not configured');
   }
@@ -398,7 +356,7 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
       Accept: 'application/json',
     },
     params: {
-      updated_at_min: lastPollIso,
+      updated_at_min: since || lastPollIso,
       limit: 100,
     },
     timeout: 20000,
@@ -409,26 +367,11 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
 
   if (!debug) {
     console.log(
-      `Loyverse fetched ${receipts.length} recent receipt(s) since ${lastPollIso}`
+      `Loyverse fetched ${receipts.length} recent receipt(s) since ${since || lastPollIso}`
     );
   }
 
   return { count: receipts.length, cursor, receipts };
-}
-
-function extractLoyverseReceiptsFromWebhook(body) {
-  if (!body) return [];
-  if (Array.isArray(body.receipts)) return body.receipts;
-  if (body.receipt && typeof body.receipt === 'object') return [body.receipt];
-  if (body.object && typeof body.object === 'object') return [body.object];
-  if (body.data?.receipt && typeof body.data.receipt === 'object') {
-    return [body.data.receipt];
-  }
-  if (body.data && typeof body.data === 'object' && body.data.receipt_number) {
-    return [body.data];
-  }
-  if (body.receipt_number) return [body];
-  return [];
 }
 
 function getReceiptId(receipt) {
@@ -509,19 +452,46 @@ function mapLoyverseReceiptToShipday(receipt) {
   };
 }
 
-async function reconcileLoyverseMissingOrders() {
+async function pollLoyverseNewTickets() {
   try {
-    const { receipts } = await fetchLoyverseReceipts();
+    const pollStartedAt = new Date().toISOString();
+    const { receipts } = await fetchLoyverseReceipts({
+      since: lastPollIso,
+    });
 
     for (const receipt of receipts) {
       const receiptId = getReceiptId(receipt);
       if (!receiptId) continue;
 
       const payload = mapLoyverseReceiptToShipday(receipt);
-      const webhookKey = `loyverse-webhook-${payload.orderNumber}`;
+      const key = `loyverse-ticket-${payload.orderNumber}`;
+
+      console.log('LOYVERSE TICKET -> SHIPDAY:', JSON.stringify(payload));
+      await safeDispatchToShipday(key, payload, 'loyverse-ticket');
+    }
+
+    lastPollIso = pollStartedAt;
+  } catch (err) {
+    console.error('LOYVERSE TICKET POLL ERROR:', err.response?.data || err.message);
+  }
+}
+
+async function reconcileLoyverseMissingOrders() {
+  try {
+    const reconcileStartedAt = new Date().toISOString();
+    const { receipts } = await fetchLoyverseReceipts({
+      since: lastReconcileIso,
+    });
+
+    for (const receipt of receipts) {
+      const receiptId = getReceiptId(receipt);
+      if (!receiptId) continue;
+
+      const payload = mapLoyverseReceiptToShipday(receipt);
+      const primaryKey = `loyverse-ticket-${payload.orderNumber}`;
       const reconcileKey = `loyverse-reconcile-${payload.orderNumber}`;
 
-      if (sentKeys.has(webhookKey) || sentKeys.has(reconcileKey)) {
+      if (sentKeys.has(primaryKey) || sentKeys.has(reconcileKey)) {
         continue;
       }
 
@@ -529,8 +499,7 @@ async function reconcileLoyverseMissingOrders() {
       await safeDispatchToShipday(reconcileKey, payload, 'loyverse-reconcile');
     }
 
-    lastPollIso = new Date().toISOString();
-    lastReconcileIso = new Date().toISOString();
+    lastReconcileIso = reconcileStartedAt;
   } catch (err) {
     console.error(
       'LOYVERSE RECONCILE ERROR:',
@@ -622,9 +591,18 @@ app.listen(PORT, () => {
 
 function startJobs() {
   console.log('Starting background jobs...');
+  console.log(`Loyverse ticket poll every ${LOYVERSE_POLL_INTERVAL_MS / 1000} second(s)`);
   console.log(
     `Retry + reconcile every ${LOYVERSE_RECONCILE_INTERVAL_MS / 60000} minute(s)`
   );
+
+  setInterval(async () => {
+    try {
+      await pollLoyverseNewTickets();
+    } catch (err) {
+      console.error('Ticket poll loop error:', err);
+    }
+  }, LOYVERSE_POLL_INTERVAL_MS);
 
   setInterval(async () => {
     try {
