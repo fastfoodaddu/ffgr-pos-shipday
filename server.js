@@ -237,7 +237,38 @@ app.get('/callback', async (req, res) => {
     ) {
       return res.status(400).json({ ok: false, error: 'Invalid state' });
     }
+app.get('/webhooks/loyverse/receipt', (_req, res) => {
+  res.status(200).send('Loyverse webhook endpoint is live. Use POST, not GET.');
+});
 
+app.post('/webhooks/loyverse/receipt', async (req, res) => {
+  try {
+    console.log('LOYVERSE WEBHOOK RAW:', JSON.stringify(req.body));
+
+    const receipts = extractLoyverseReceiptsFromWebhook(req.body);
+
+    if (!receipts.length) {
+      return res.status(200).json({ ok: true, skipped: 'no receipts found' });
+    }
+
+    for (const receipt of receipts) {
+      const payload = mapLoyverseReceiptToShipday(receipt);
+      const key = `loyverse-webhook-${payload.orderNumber}`;
+
+      console.log('LOYVERSE WEBHOOK -> SHIPDAY:', JSON.stringify(payload));
+      await safeDispatchToShipday(key, payload, 'loyverse-webhook');
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('LOYVERSE WEBHOOK ERROR:', err.response?.data || err.message);
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+      details: err.response?.data || null,
+    });
+  }
+});
     const tokenRes = await axios.post(
       `${LOYVERSE_API_BASE}/oauth/token`,
       new URLSearchParams({
