@@ -36,7 +36,6 @@ app.get("/test-ewity", async (req, res) => {
   }
 });
 
-// Probe likely Ewity sales endpoints
 app.get("/probe-sales", async (req, res) => {
   const endpoints = [
     "/v1/sales/bills",
@@ -68,28 +67,6 @@ app.get("/probe-sales", async (req, res) => {
   }
 
   res.json(results);
-});
-
-// Test one bill by QR if you have a valid Ewity bill QR link
-app.get("/bill-from-qr", async (req, res) => {
-  try {
-    const qr = req.query.qr;
-    if (!qr) {
-      return res.status(400).json({ error: "Missing qr parameter" });
-    }
-
-    const encodedQr = encodeURIComponent(qr);
-    const r = await axios.get(`${BASE}/v1/sales/bills/from-qr?qr=${encodedQr}`, {
-      headers
-    });
-
-    res.json(r.data);
-  } catch (err) {
-    res.status(err.response?.status || 500).json({
-      success: false,
-      error: err.response?.data || err.message
-    });
-  }
 });
 
 app.listen(PORT, "0.0.0.0", () => {
