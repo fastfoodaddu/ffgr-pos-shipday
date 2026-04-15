@@ -36,6 +36,30 @@ app.get("/test-ewity", async (req, res) => {
   }
 });
 
+app.get("/bill-from-qr", async (req, res) => {
+  try {
+    const qr = req.query.qr;
+    if (!qr) {
+      return res.status(400).json({ error: "Missing qr parameter" });
+    }
+
+    const r = await axios.get(
+      `${BASE}/v1/sales/bills/from-qr?qr=${encodeURIComponent(qr)}`,
+      { headers }
+    );
+
+    res.json({
+      success: true,
+      data: r.data
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message
+    });
+  }
+});
+
 app.get("/probe-sales", async (req, res) => {
   const endpoints = [
     "/v1/sales/bills",
