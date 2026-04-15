@@ -9,7 +9,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const BASE = "https://api.ewitypos.com";
-const TOKEN = process.env.EWITY_TOKEN;
+const TOKEN = process.env.EWITY_API_TOKEN;
 
 const headers = {
   Authorization: `Bearer ${TOKEN}`,
