@@ -1,60 +1,152 @@
-const express = require("express");
-const axios = require("axios");
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
 
-// 🔥 Shipday config
-const SHIPDAY_API_KEY = "DEXMH5Y4iB.G7HBSXvPaqEAqzVhKTHW";
-const SHIPDAY_URL = "https://api.shipday.com/orders";
+const PORT = process.env.PORT || 8080;
+const TIME_ZONE = 'Indian/Maldives';
 
-// Maldives timezone fix
-function getMaldivesTime() {
-  return new Date().toLocaleString("en-US", { timeZone: "Indian/Maldives" });
+const EWITY_BASE = 'https://app.ewitypos.com/api/ecom-v1';
+const SHIPDAY_BASE = 'https://api.shipday.com';
+
+const POLL_INTERVAL = 30000; // 30 sec
+const RETRY_INTERVAL = 900000; // 15 min
+
+let lastPoll = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+const sent = new Set();
+const failed = new Map();
+
+function now() {
+  return new Date().toLocaleString('en-US', { timeZone: TIME_ZONE });
 }
 
-// 👉 Ewity webhook endpoint
-app.post("/ewity-webhook", async (req, res) => {
+// -----------------------------
+// FETCH EWITY ORDERS (IMPORTANT)
+// -----------------------------
+async function fetchOrders() {
   try {
-    const order = req.body;
+    const res = await axios.get(`${EWITY_BASE}/orders`, {
+      headers: {
+        'X-Ewity-Platform': process.env.EWITY_PLATFORM,
+        Authorization: `Bearer ${process.env.EWITY_API_TOKEN}`,
+      },
+      params: {
+        updated_at_min: lastPoll,
+      },
+    });
 
-    // ⚠️ Adjust based on Ewity structure
-    const shipdayPayload = {
-      orderNumber: order.invoice_no || order.id,
-      customerName: order.customer?.name || "Customer",
-      customerPhoneNumber: order.customer?.phone || "",
-      customerAddress: order.customer?.address || "Unknown",
-      orderSource: "EWITY",
-      deliveryFee: 0,
-      orderItems: (order.items || []).map(i => ({
-        name: i.name,
-        quantity: i.qty,
-        unitPrice: i.price
-      })),
-      totalOrderCost: order.total || 0,
-      expectedPickupTime: getMaldivesTime()
-    };
+    const orders = res.data?.data || [];
 
-    const response = await axios.post(
-      SHIPDAY_URL,
-      shipdayPayload,
-      {
-        headers: {
-          Authorization: `Bearer ${SHIPDAY_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
+    console.log(`[${now()}] Ewity returned ${orders.length} orders`);
 
-    console.log("✅ Sent to Shipday:", response.data);
-    res.send("OK");
-
+    return orders;
   } catch (err) {
-    console.error("❌ Error:", err.response?.data || err.message);
-    res.status(500).send("Error");
+    console.error('EWITY FETCH ERROR:', err.response?.data || err.message);
+    return [];
   }
+}
+
+// -----------------------------
+// MAP TO SHIPDAY
+// -----------------------------
+function mapToShipday(order) {
+  const phone = order.customer?.phone || '7739160';
+  const name = order.customer?.name || 'Customer';
+
+  const address = order.customer?.address || 'Hithadhoo';
+  const notes = order.notes || '';
+
+  return {
+    orderNumber: String(order.id || Date.now()),
+    customerName: `${name} - ${phone}`,
+    customerPhoneNumber: phone,
+    customerAddress: notes ? `${address} - ${notes}` : address,
+    deliveryInstruction: notes,
+    restaurantName: process.env.SHIPDAY_RESTAURANT_NAME,
+    restaurantAddress: process.env.SHIPDAY_RESTAURANT_ADDRESS,
+    restaurantPhoneNumber: process.env.SHIPDAY_RESTAURANT_PHONE,
+    orderItem: (order.items || []).map(i => ({
+      name: i.name,
+      quantity: i.quantity || 1,
+    })),
+    totalOrderCost: order.total || 1,
+    paymentMethod: 'cash',
+  };
+}
+
+// -----------------------------
+// SEND TO SHIPDAY
+// -----------------------------
+async function sendToShipday(payload) {
+  return axios.post(`${SHIPDAY_BASE}/orders`, payload, {
+    headers: {
+      Authorization: `Basic ${process.env.SHIPDAY_API_KEY}`,
+    },
+  });
+}
+
+// -----------------------------
+// MAIN POLLING
+// -----------------------------
+async function poll() {
+  const orders = await fetchOrders();
+  const nowIso = new Date().toISOString();
+
+  for (const order of orders) {
+    const key = `ewity-${order.id}`;
+
+    if (sent.has(key)) continue;
+
+    try {
+      const payload = mapToShipday(order);
+
+      console.log('SENDING TO SHIPDAY:', payload);
+
+      await sendToShipday(payload);
+
+      sent.add(key);
+      failed.delete(key);
+
+      console.log('SUCCESS:', order.id);
+    } catch (err) {
+      console.error('FAILED:', err.response?.data || err.message);
+
+      failed.set(key, order);
+    }
+  }
+
+  lastPoll = nowIso;
+}
+
+// -----------------------------
+// RETRY FAILED
+// -----------------------------
+async function retryFailed() {
+  for (const [key, order] of failed.entries()) {
+    try {
+      const payload = mapToShipday(order);
+
+      await sendToShipday(payload);
+
+      sent.add(key);
+      failed.delete(key);
+
+      console.log('RETRY SUCCESS:', key);
+    } catch (err) {
+      console.error('RETRY FAILED:', key);
+    }
+  }
+}
+
+// -----------------------------
+// START
+// -----------------------------
+app.listen(PORT, () => {
+  console.log(`Server running on ${PORT}`);
 });
 
-app.listen(3000, () => {
-  console.log("🚀 Server running on port 3000");
-});
+setInterval(poll, POLL_INTERVAL);
+setInterval(retryFailed, RETRY_INTERVAL);
