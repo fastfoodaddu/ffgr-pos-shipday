@@ -30,84 +30,70 @@ function shipdayHeaders() {
   };
 }
 
-function getClientBillIdFromTask(task) {
-  return (
-    task?.client_bill_id ||
-    task?.bill?.id ||
-    task?.data?.client_bill_id ||
-    task?.meta?.client_bill_id ||
-    task?.clientBillId ||
-    null
+async function fetchEwityDr3Bill(clientBillId) {
+  const response = await axios.post(
+    `${EWITY_BASE}/ebills/dr3-bill`,
+    { client_bill_id: clientBillId },
+    { headers: ewityHeaders() }
   );
+  return response.data;
 }
 
-function mapEwityBillToShipdayPayload(billResponse) {
-  const raw =
-    billResponse?.data?.bill ||
-    billResponse?.bill ||
-    billResponse?.data ||
-    billResponse;
+async function fetchEwityPublicBillJson(publicId) {
+  const response = await axios.get(
+    `https://my.ewity.com/b/${encodeURIComponent(publicId)}?_data=routes/b/$id`,
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    }
+  );
+  return response.data;
+}
 
-  const bill = raw || {};
-  const customer = bill.customer || {};
-  const table = bill.table || {};
-  const lines = Array.isArray(bill.bill_lines) ? bill.bill_lines : [];
+function extractPublicBillId(dr3Response) {
+  const url = dr3Response?.data?.url || dr3Response?.url || "";
+  const match = url.match(/\\/b\\/([^/?#]+)/);
+  return match ? match[1] : null;
+}
 
-  const customerName =
-    customer.name ||
-    customer.full_name ||
-    customer.display_name ||
-    customer.customer_name ||
-    "FFGR Customer";
+function parseMoney(text) {
+  if (text == null) return 0;
+  const cleaned = String(text).replace(/[^0-9.\\-]/g, "");
+  return Number(cleaned || 0);
+}
 
-  const customerPhoneNumber =
-    customer.mobile ||
-    customer.phone ||
-    customer.contact ||
-    customer.telephone ||
-    customer.whatsapp ||
-    "";
+function mapPublicBillToShipday(publicBillJson) {
+  const bill = publicBillJson?.bill || {};
+  const customer = bill?.customer?.object || {};
+  const headerParts = Array.isArray(bill?.header_parts) ? bill.header_parts : [];
+  const totalParts = Array.isArray(bill?.total_parts) ? bill.total_parts : [];
+  const lines = Array.isArray(bill?.bill_lines) ? bill.bill_lines : [];
 
-  const customerAddress =
-    customer.address ||
-    customer.full_address ||
-    customer.street ||
-    customer.location ||
-    table.name_text ||
-    "Address not provided";
+  const headerMap = Object.fromEntries(
+    headerParts.map(part => [part.key, part.value])
+  );
 
-  const orderNumber =
-    bill.invoice_number ||
-    bill.temp_number ||
-    bill.number ||
-    bill.id ||
-    "";
+  const totalMap = Object.fromEntries(
+    totalParts.map(part => [part.key, part.value])
+  );
 
-  const totalOrderCost = Number(bill.total ?? 0);
-
-  const orderItems = lines.map((line) => ({
-    name:
-      line.name ||
-      line.product_name ||
-      line.item_name ||
-      line.title ||
-      "Item",
-    unitPrice: Number(
-      line.sales_price ??
-      line.price ??
-      line.unit_price ??
-      line.amount ??
-      0
-    ),
-    quantity: Number(line.quantity ?? line.qty ?? 1),
+  const orderItems = lines.map(line => ({
+    name: line?.variant?.name || "Item",
+    unitPrice: parseMoney(line?.total_text),
+    quantity: Number(String(line?.quantity_text || "1").match(/[0-9.]+/)?.[0] || 1),
     addOns: [],
   }));
 
-  const payload = {
-    orderNumber: String(orderNumber),
-    customerName: String(customerName),
-    customerAddress: String(customerAddress),
-    customerPhoneNumber: String(customerPhoneNumber),
+  const totalOrderCost =
+    parseMoney(totalMap["Total"]) ||
+    parseMoney(bill?.total_text);
+
+  return {
+    orderNumber: headerMap["Bill Number"] || bill?.number || bill?.client_bill_id || "",
+    customerName: customer?.name || "FFGR Customer",
+    customerPhoneNumber: customer?.mobile || "",
+    customerAddress: process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
     restaurantName: process.env.RESTAURANT_NAME || "FFGR",
     totalOrderCost,
     expectedPickupTime: new Date().toISOString(),
@@ -115,54 +101,21 @@ function mapEwityBillToShipdayPayload(billResponse) {
       process.env.FFGR_PICKUP_ADDRESS ||
       "Fast Food Gourmet Restaurant, Hithadhoo, Addu City",
     orderItems,
-    notes: `Ewity Bill ID: ${bill.id || ""}`,
+    notes: [
+      `Ewity Public Bill ID: ${publicBillJson?.id || ""}`,
+      `Ewity Client Bill ID: ${bill?.client_bill_id || ""}`,
+      `Payment Status: ${headerMap["Payment Status"] || bill?.payment_status || ""}`,
+      `Date: ${headerMap["Date"] || ""}`
+    ].filter(Boolean).join(" | "),
   };
-
-  if (process.env.FFGR_PICKUP_LAT) {
-    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
-  }
-
-  if (process.env.FFGR_PICKUP_LNG) {
-    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
-  }
-
-  return payload;
 }
 
-async function fetchEwityTasks(limit = 5) {
-  const response = await axios.get(
-    `${EWITY_BASE}/async-tasks/my?limit=${encodeURIComponent(limit)}`,
-    {
-      headers: ewityHeaders(),
-    }
-  );
-  return response.data;
-}
-
-async function fetchEwityBill(clientBillId) {
-  const response = await axios.post(
-    `${EWITY_BASE}/ebills/dr3-bill`,
-    { client_bill_id: clientBillId },
-    {
-      headers: ewityHeaders(),
-    }
-  );
-  return response.data;
-}
-
-async function sendToShipday(shipdayPayload) {
-  if (!SHIPDAY_API_KEY) {
-    throw new Error("SHIPDAY_API_KEY is missing");
-  }
-
+async function sendToShipday(payload) {
   const response = await axios.post(
     "https://api.shipday.com/orders",
-    shipdayPayload,
-    {
-      headers: shipdayHeaders(),
-    }
+    payload,
+    { headers: shipdayHeaders() }
   );
-
   return response.data;
 }
 
@@ -175,39 +128,14 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/test-ewity-orders", async (req, res) => {
+app.get("/test-ewity-public-bill", async (req, res) => {
   try {
-    const data = await fetchEwityTasks(5);
-    res.json(data);
-  } catch (err) {
-    res.status(err.response?.status || 500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
-
-app.get("/ewity-orders", async (req, res) => {
-  try {
-    const data = await fetchEwityTasks(5);
-    res.json(data);
-  } catch (err) {
-    res.status(err.response?.status || 500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
-
-app.post("/test-ewity-bill", async (req, res) => {
-  try {
-    const { client_bill_id } = req.body;
-
-    if (!client_bill_id) {
-      return res.status(400).json({ error: "client_bill_id is required" });
+    const id = req.query.id;
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
     }
 
-    const data = await fetchEwityBill(client_bill_id);
+    const data = await fetchEwityPublicBillJson(id);
     res.json(data);
   } catch (err) {
     res.status(err.response?.status || 500).json({
@@ -217,82 +145,32 @@ app.post("/test-ewity-bill", async (req, res) => {
   }
 });
 
-app.get("/test-ewity-bill-get", async (req, res) => {
+app.get("/test-ewity-bill-from-client", async (req, res) => {
   try {
     const client_bill_id = req.query.client_bill_id;
-
     if (!client_bill_id) {
       return res.status(400).json({ error: "client_bill_id is required" });
     }
 
-    const data = await fetchEwityBill(client_bill_id);
-    res.json(data);
-  } catch (err) {
-    res.status(err.response?.status || 500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
+    const dr3 = await fetchEwityDr3Bill(client_bill_id);
+    const publicId = extractPublicBillId(dr3);
 
-app.get("/sync-ewity", async (req, res) => {
-  try {
-    const tasksData = await fetchEwityTasks(5);
-    const tasks = Array.isArray(tasksData?.data) ? tasksData.data : [];
-
-    const results = [];
-
-    for (const task of tasks) {
-      const clientBillId = getClientBillIdFromTask(task);
-
-      if (!clientBillId) {
-        results.push({
-          skipped: true,
-          reason: "client_bill_id not found in task",
-          task,
-        });
-        continue;
-      }
-
-      const billData = await fetchEwityBill(clientBillId);
-
-      results.push({
-        client_bill_id: clientBillId,
-        billData,
+    if (!publicId) {
+      return res.status(500).json({
+        success: false,
+        error: "Could not extract public bill ID from dr3 response",
+        dr3,
       });
     }
 
-    res.json({
-      success: true,
-      count: results.length,
-      results,
-    });
-  } catch (err) {
-    res.status(err.response?.status || 500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
-
-app.post("/sync-one-to-shipday", async (req, res) => {
-  try {
-    const { client_bill_id } = req.body;
-
-    if (!client_bill_id) {
-      return res.status(400).json({ error: "client_bill_id is required" });
-    }
-
-    const billData = await fetchEwityBill(client_bill_id);
-    const shipdayPayload = mapEwityBillToShipdayPayload(billData);
-    const shipdayResponse = await sendToShipday(shipdayPayload);
+    const publicBill = await fetchEwityPublicBillJson(publicId);
 
     res.json({
       success: true,
       client_bill_id,
-      billData,
-      shipdayPayload,
-      shipdayResponse,
+      publicId,
+      dr3,
+      publicBill,
     });
   } catch (err) {
     res.status(err.response?.status || 500).json({
@@ -302,67 +180,45 @@ app.post("/sync-one-to-shipday", async (req, res) => {
   }
 });
 
-app.get("/sync-one-to-shipday-get", async (req, res) => {
+app.get("/test-shipday-payload", async (req, res) => {
   try {
-    const client_bill_id = req.query.client_bill_id;
-
-    if (!client_bill_id) {
-      return res.status(400).json({ error: "client_bill_id is required" });
+    const id = req.query.id;
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
     }
 
-    const billData = await fetchEwityBill(client_bill_id);
-    const shipdayPayload = mapEwityBillToShipdayPayload(billData);
+    const publicBill = await fetchEwityPublicBillJson(id);
+    const shipdayPayload = mapPublicBillToShipday(publicBill);
+
+    res.json({
+      success: true,
+      publicBill,
+      shipdayPayload,
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
+app.get("/send-public-bill-to-shipday", async (req, res) => {
+  try {
+    const id = req.query.id;
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
+    }
+
+    const publicBill = await fetchEwityPublicBillJson(id);
+    const shipdayPayload = mapPublicBillToShipday(publicBill);
     const shipdayResponse = await sendToShipday(shipdayPayload);
 
     res.json({
       success: true,
-      client_bill_id,
-      billData,
+      publicBill,
       shipdayPayload,
       shipdayResponse,
-    });
-  } catch (err) {
-    res.status(err.response?.status || 500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
-
-app.get("/sync-all-to-shipday", async (req, res) => {
-  try {
-    const tasksData = await fetchEwityTasks(5);
-    const tasks = Array.isArray(tasksData?.data) ? tasksData.data : [];
-
-    const results = [];
-
-    for (const task of tasks) {
-      const clientBillId = getClientBillIdFromTask(task);
-
-      if (!clientBillId) {
-        results.push({
-          skipped: true,
-          reason: "client_bill_id not found in task",
-          task,
-        });
-        continue;
-      }
-
-      const billData = await fetchEwityBill(clientBillId);
-      const shipdayPayload = mapEwityBillToShipdayPayload(billData);
-      const shipdayResponse = await sendToShipday(shipdayPayload);
-
-      results.push({
-        client_bill_id: clientBillId,
-        shipdayPayload,
-        shipdayResponse,
-      });
-    }
-
-    res.json({
-      success: true,
-      count: results.length,
-      results,
     });
   } catch (err) {
     res.status(err.response?.status || 500).json({
