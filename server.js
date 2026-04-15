@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
 
@@ -30,11 +30,33 @@ function shipdayHeaders() {
   };
 }
 
+function parseMoney(text) {
+  if (text == null) return 0;
+  const cleaned = String(text).replace(/[^0-9.-]/g, "");
+  return Number(cleaned || 0);
+}
+
+function extractPublicBillId(dr3Response) {
+  const url = dr3Response?.data?.url || dr3Response?.url || "";
+  if (!url) return null;
+
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length >= 2 && parts[0] === "b") {
+      return parts[1];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchEwityDr3Bill(clientBillId) {
   const response = await axios.post(
     `${EWITY_BASE}/ebills/dr3-bill`,
     { client_bill_id: clientBillId },
-    { headers: ewityHeaders() }
+    { headers: ewityHeaders(), timeout: 20000 }
   );
   return response.data;
 }
@@ -43,24 +65,11 @@ async function fetchEwityPublicBillJson(publicId) {
   const response = await axios.get(
     `https://my.ewity.com/b/${encodeURIComponent(publicId)}?_data=routes/b/$id`,
     {
-      headers: {
-        Accept: "application/json",
-      },
+      headers: { Accept: "application/json" },
+      timeout: 20000,
     }
   );
   return response.data;
-}
-
-function extractPublicBillId(dr3Response) {
-  const url = dr3Response?.data?.url || dr3Response?.url || "";
-  const match = url.match(/\\/b\\/([^/?#]+)/);
-  return match ? match[1] : null;
-}
-
-function parseMoney(text) {
-  if (text == null) return 0;
-  const cleaned = String(text).replace(/[^0-9.\\-]/g, "");
-  return Number(cleaned || 0);
 }
 
 function mapPublicBillToShipday(publicBillJson) {
@@ -71,14 +80,14 @@ function mapPublicBillToShipday(publicBillJson) {
   const lines = Array.isArray(bill?.bill_lines) ? bill.bill_lines : [];
 
   const headerMap = Object.fromEntries(
-    headerParts.map(part => [part.key, part.value])
+    headerParts.map((part) => [part.key, part.value])
   );
 
   const totalMap = Object.fromEntries(
-    totalParts.map(part => [part.key, part.value])
+    totalParts.map((part) => [part.key, part.value])
   );
 
-  const orderItems = lines.map(line => ({
+  const orderItems = lines.map((line) => ({
     name: line?.variant?.name || "Item",
     unitPrice: parseMoney(line?.total_text),
     quantity: Number(String(line?.quantity_text || "1").match(/[0-9.]+/)?.[0] || 1),
@@ -86,14 +95,18 @@ function mapPublicBillToShipday(publicBillJson) {
   }));
 
   const totalOrderCost =
-    parseMoney(totalMap["Total"]) ||
-    parseMoney(bill?.total_text);
+    parseMoney(totalMap["Total"]) || parseMoney(bill?.total_text);
 
-  return {
-    orderNumber: headerMap["Bill Number"] || bill?.number || bill?.client_bill_id || "",
+  const payload = {
+    orderNumber:
+      headerMap["Bill Number"] ||
+      bill?.number ||
+      bill?.client_bill_id ||
+      "",
     customerName: customer?.name || "FFGR Customer",
     customerPhoneNumber: customer?.mobile || "",
-    customerAddress: process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
+    customerAddress:
+      process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
     restaurantName: process.env.RESTAURANT_NAME || "FFGR",
     totalOrderCost,
     expectedPickupTime: new Date().toISOString(),
@@ -105,17 +118,37 @@ function mapPublicBillToShipday(publicBillJson) {
       `Ewity Public Bill ID: ${publicBillJson?.id || ""}`,
       `Ewity Client Bill ID: ${bill?.client_bill_id || ""}`,
       `Payment Status: ${headerMap["Payment Status"] || bill?.payment_status || ""}`,
-      `Date: ${headerMap["Date"] || ""}`
-    ].filter(Boolean).join(" | "),
+      `Date: ${headerMap["Date"] || ""}`,
+    ]
+      .filter(Boolean)
+      .join(" | "),
   };
+
+  if (process.env.FFGR_PICKUP_LAT) {
+    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
+  }
+
+  if (process.env.FFGR_PICKUP_LNG) {
+    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
+  }
+
+  return payload;
 }
 
 async function sendToShipday(payload) {
+  if (!SHIPDAY_API_KEY) {
+    throw new Error("SHIPDAY_API_KEY is missing");
+  }
+
   const response = await axios.post(
     "https://api.shipday.com/orders",
     payload,
-    { headers: shipdayHeaders() }
+    {
+      headers: shipdayHeaders(),
+      timeout: 20000,
+    }
   );
+
   return response.data;
 }
 
@@ -138,6 +171,7 @@ app.get("/test-ewity-public-bill", async (req, res) => {
     const data = await fetchEwityPublicBillJson(id);
     res.json(data);
   } catch (err) {
+    console.error("test-ewity-public-bill error:", err.response?.data || err.message);
     res.status(err.response?.status || 500).json({
       success: false,
       error: err.response?.data || err.message,
@@ -173,6 +207,7 @@ app.get("/test-ewity-bill-from-client", async (req, res) => {
       publicBill,
     });
   } catch (err) {
+    console.error("test-ewity-bill-from-client error:", err.response?.data || err.message);
     res.status(err.response?.status || 500).json({
       success: false,
       error: err.response?.data || err.message,
@@ -196,6 +231,7 @@ app.get("/test-shipday-payload", async (req, res) => {
       shipdayPayload,
     });
   } catch (err) {
+    console.error("test-shipday-payload error:", err.response?.data || err.message);
     res.status(err.response?.status || 500).json({
       success: false,
       error: err.response?.data || err.message,
@@ -221,11 +257,20 @@ app.get("/send-public-bill-to-shipday", async (req, res) => {
       shipdayResponse,
     });
   } catch (err) {
+    console.error("send-public-bill-to-shipday error:", err.response?.data || err.message);
     res.status(err.response?.status || 500).json({
       success: false,
       error: err.response?.data || err.message,
     });
   }
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
