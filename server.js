@@ -3,7 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 
-console.log('FFGR BUILD: loyverse-webhook-reconcile-v2');
+console.log('FFGR BUILD: ticket-created-fast-safe-v1');
 
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err);
@@ -23,13 +23,18 @@ function rawBodySaver(req, _res, buf) {
 const PORT = Number(process.env.PORT || 8080);
 const SHIPDAY_BASE = 'https://api.shipday.com';
 const LOYVERSE_API_BASE = 'https://api.loyverse.com';
-const RECONCILE_INTERVAL_MS = Number(
+
+const LOYVERSE_POLL_INTERVAL_MS = Number(
+  process.env.LOYVERSE_POLL_INTERVAL_MS || 30000
+); // 30 sec
+const LOYVERSE_RECONCILE_INTERVAL_MS = Number(
   process.env.LOYVERSE_RECONCILE_INTERVAL_MS || 900000
-);
+); // 15 min
 
 // in-memory tracking
-const sentOrderKeys = new Set();
+const sentKeys = new Set();
 const failedQueue = new Map();
+let lastPollIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 let lastReconcileIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
 app.get('/', (_req, res) => {
@@ -39,8 +44,9 @@ app.get('/', (_req, res) => {
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    build: 'loyverse-webhook-reconcile-v2',
-    reconcileEveryMs: RECONCILE_INTERVAL_MS,
+    build: 'ticket-created-fast-safe-v1',
+    loyversePollMs: LOYVERSE_POLL_INTERVAL_MS,
+    loyverseReconcileMs: LOYVERSE_RECONCILE_INTERVAL_MS,
   });
 });
 
@@ -50,7 +56,10 @@ app.get('/test/shipday', async (_req, res) => {
       orderNumber: `TEST-${Date.now()}`,
       customerName: `${process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME || 'Test Customer'} - ${process.env.SHIPDAY_DEFAULT_PHONE || '7739160'}`,
       customerPhoneNumber: process.env.SHIPDAY_DEFAULT_PHONE || '7739160',
-      customerAddress: `${process.env.SHIPDAY_DEFAULT_ADDRESS || 'Hithadhoo'} - ${process.env.SHIPDAY_DEFAULT_NOTE || 'Leave at door'}`,
+      customerAddress: formatAddressLine(
+        process.env.SHIPDAY_DEFAULT_ADDRESS || 'Hithadhoo',
+        process.env.SHIPDAY_DEFAULT_NOTE || 'Leave at door'
+      ),
       deliveryInstruction: process.env.SHIPDAY_DEFAULT_NOTE || 'Leave at door',
       restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
       restaurantAddress:
@@ -65,7 +74,6 @@ app.get('/test/shipday', async (_req, res) => {
     console.log('TEST Shipday payload:', JSON.stringify(payload));
     const result = await sendToShipday(payload);
     console.log('TEST Shipday success:', result);
-
     return res.status(200).json({ ok: true, result });
   } catch (err) {
     console.error('TEST Shipday failed:', err.response?.data || err.message);
@@ -83,7 +91,6 @@ app.get('/test/shipday', async (_req, res) => {
 app.post('/webhooks/woocommerce/order-created', async (req, res) => {
   try {
     verifyWooWebhook(req);
-
     const order = req.body || {};
     const payload = mapWooOrderToShipday(order);
     const key = `woo-created-${payload.orderNumber}`;
@@ -105,7 +112,6 @@ app.post('/webhooks/woocommerce/order-created', async (req, res) => {
 app.post('/webhooks/woocommerce/order-updated', async (req, res) => {
   try {
     verifyWooWebhook(req);
-
     const order = req.body || {};
     const payload = mapWooOrderToShipday(order);
     const key = `woo-updated-${payload.orderNumber}-${order.status || 'unknown'}`;
@@ -167,8 +173,8 @@ function mapWooOrderToShipday(order) {
     process.env.SHIPDAY_DEFAULT_ADDRESS ||
     'Hithadhoo';
 
-  const note = order.customer_note || process.env.SHIPDAY_DEFAULT_NOTE || '';
-  const customerName =
+  const note = String(order.customer_note || '').trim();
+  const customerNameRaw =
     [billing.first_name, billing.last_name].filter(Boolean).join(' ') ||
     process.env.SHIPDAY_DEFAULT_CUSTOMER_NAME ||
     'Customer';
@@ -177,9 +183,9 @@ function mapWooOrderToShipday(order) {
 
   return {
     orderNumber: String(order.id || Date.now()),
-    customerName: `${customerName} - ${customerPhone}`,
+    customerName: `${customerNameRaw} - ${customerPhone}`,
     customerPhoneNumber: customerPhone,
-    customerAddress: note ? `${baseAddress} - ${note}` : baseAddress,
+    customerAddress: formatAddressLine(baseAddress, note),
     deliveryInstruction: note,
     restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
     restaurantAddress:
@@ -237,38 +243,7 @@ app.get('/callback', async (req, res) => {
     ) {
       return res.status(400).json({ ok: false, error: 'Invalid state' });
     }
-app.get('/webhooks/loyverse/receipt', (_req, res) => {
-  res.status(200).send('Loyverse webhook endpoint is live. Use POST, not GET.');
-});
 
-app.post('/webhooks/loyverse/receipt', async (req, res) => {
-  try {
-    console.log('LOYVERSE WEBHOOK RAW:', JSON.stringify(req.body));
-
-    const receipts = extractLoyverseReceiptsFromWebhook(req.body);
-
-    if (!receipts.length) {
-      return res.status(200).json({ ok: true, skipped: 'no receipts found' });
-    }
-
-    for (const receipt of receipts) {
-      const payload = mapLoyverseReceiptToShipday(receipt);
-      const key = `loyverse-webhook-${payload.orderNumber}`;
-
-      console.log('LOYVERSE WEBHOOK -> SHIPDAY:', JSON.stringify(payload));
-      await safeDispatchToShipday(key, payload, 'loyverse-webhook');
-    }
-
-    return res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error('LOYVERSE WEBHOOK ERROR:', err.response?.data || err.message);
-    return res.status(500).json({
-      ok: false,
-      error: err.message,
-      details: err.response?.data || null,
-    });
-  }
-});
     const tokenRes = await axios.post(
       `${LOYVERSE_API_BASE}/oauth/token`,
       new URLSearchParams({
@@ -355,8 +330,12 @@ app.post('/auth/loyverse/refresh', async (_req, res) => {
 });
 
 // -----------------------------
-// Loyverse direct webhook
+// Loyverse direct webhook (primary)
 // -----------------------------
+app.get('/webhooks/loyverse/receipt', (_req, res) => {
+  res.status(200).send('Loyverse webhook endpoint is live. Use POST.');
+});
+
 app.post('/webhooks/loyverse/receipt', async (req, res) => {
   try {
     console.log('LOYVERSE WEBHOOK RAW:', JSON.stringify(req.body));
@@ -368,6 +347,12 @@ app.post('/webhooks/loyverse/receipt', async (req, res) => {
     }
 
     for (const receipt of receipts) {
+      const receiptId = getReceiptId(receipt);
+      if (!receiptId) {
+        console.log('Skipping receipt with no usable id:', JSON.stringify(receipt));
+        continue;
+      }
+
       const payload = mapLoyverseReceiptToShipday(receipt);
       const key = `loyverse-webhook-${payload.orderNumber}`;
 
@@ -387,7 +372,7 @@ app.post('/webhooks/loyverse/receipt', async (req, res) => {
 });
 
 // -----------------------------
-// Loyverse reconcile + debug
+// Loyverse reconcile (backup)
 // -----------------------------
 app.get('/debug/loyverse', async (_req, res) => {
   try {
@@ -413,7 +398,7 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
       Accept: 'application/json',
     },
     params: {
-      updated_at_min: lastReconcileIso,
+      updated_at_min: lastPollIso,
       limit: 100,
     },
     timeout: 20000,
@@ -424,7 +409,7 @@ async function fetchLoyverseReceipts({ debug = false } = {}) {
 
   if (!debug) {
     console.log(
-      `Loyverse reconcile fetched ${receipts.length} receipts since ${lastReconcileIso}`
+      `Loyverse fetched ${receipts.length} recent receipt(s) since ${lastPollIso}`
     );
   }
 
@@ -511,9 +496,7 @@ function mapLoyverseReceiptToShipday(receipt) {
     orderNumber: String(receipt.receipt_number || getReceiptId(receipt) || Date.now()),
     customerName: `${customerNameRaw} - ${customerPhone}`,
     customerPhoneNumber: customerPhone,
-    customerAddress: parsed.notes
-      ? `${parsed.address} - ${parsed.notes}`
-      : parsed.address,
+    customerAddress: formatAddressLine(parsed.address, parsed.notes),
     deliveryInstruction: parsed.notes,
     restaurantName: process.env.SHIPDAY_RESTAURANT_NAME || 'FFGR',
     restaurantAddress:
@@ -538,7 +521,7 @@ async function reconcileLoyverseMissingOrders() {
       const webhookKey = `loyverse-webhook-${payload.orderNumber}`;
       const reconcileKey = `loyverse-reconcile-${payload.orderNumber}`;
 
-      if (sentOrderKeys.has(webhookKey) || sentOrderKeys.has(reconcileKey)) {
+      if (sentKeys.has(webhookKey) || sentKeys.has(reconcileKey)) {
         continue;
       }
 
@@ -546,9 +529,13 @@ async function reconcileLoyverseMissingOrders() {
       await safeDispatchToShipday(reconcileKey, payload, 'loyverse-reconcile');
     }
 
+    lastPollIso = new Date().toISOString();
     lastReconcileIso = new Date().toISOString();
   } catch (err) {
-    console.error('LOYVERSE RECONCILE ERROR:', err.response?.data || err.message);
+    console.error(
+      'LOYVERSE RECONCILE ERROR:',
+      err.response?.data || err.message
+    );
   }
 }
 
@@ -556,19 +543,22 @@ async function reconcileLoyverseMissingOrders() {
 // Shipday dispatch + retry
 // -----------------------------
 async function safeDispatchToShipday(orderKey, payload, source) {
-  if (sentOrderKeys.has(orderKey)) {
+  if (sentKeys.has(orderKey)) {
     console.log(`Skipping already sent order ${orderKey}`);
     return;
   }
 
   try {
     const result = await sendToShipday(payload);
-    sentOrderKeys.add(orderKey);
+    sentKeys.add(orderKey);
     failedQueue.delete(orderKey);
     console.log(`${source.toUpperCase()} SENT:`, result);
     return result;
   } catch (err) {
-    console.error(`${source.toUpperCase()} ERROR:`, err.response?.data || err.message);
+    console.error(
+      `${source.toUpperCase()} ERROR:`,
+      err.response?.data || err.message
+    );
 
     failedQueue.set(orderKey, {
       payload,
@@ -589,11 +579,14 @@ async function retryFailedOrders() {
   for (const [orderKey, entry] of failedQueue.entries()) {
     try {
       const result = await sendToShipday(entry.payload);
-      sentOrderKeys.add(orderKey);
+      sentKeys.add(orderKey);
       failedQueue.delete(orderKey);
       console.log(`RETRY SUCCESS ${orderKey}:`, result);
     } catch (err) {
-      console.error(`RETRY FAILED ${orderKey}:`, err.response?.data || err.message);
+      console.error(
+        `RETRY FAILED ${orderKey}:`,
+        err.response?.data || err.message
+      );
       entry.attempts += 1;
       entry.lastError = err.response?.data || err.message;
       failedQueue.set(orderKey, entry);
@@ -614,6 +607,12 @@ async function sendToShipday(payload) {
   return data;
 }
 
+function formatAddressLine(address, notes) {
+  const a = String(address || '').trim();
+  const n = String(notes || '').trim();
+  return a && n ? `${a} - ${n}` : a || n || 'Hithadhoo';
+}
+
 // -----------------------------
 // Start + scheduler
 // -----------------------------
@@ -624,7 +623,7 @@ app.listen(PORT, () => {
 function startJobs() {
   console.log('Starting background jobs...');
   console.log(
-    `Loyverse reconcile every ${RECONCILE_INTERVAL_MS / 60000} minute(s)`
+    `Retry + reconcile every ${LOYVERSE_RECONCILE_INTERVAL_MS / 60000} minute(s)`
   );
 
   setInterval(async () => {
@@ -633,7 +632,7 @@ function startJobs() {
     } catch (err) {
       console.error('Retry loop error:', err);
     }
-  }, RECONCILE_INTERVAL_MS);
+  }, LOYVERSE_RECONCILE_INTERVAL_MS);
 
   setInterval(async () => {
     try {
@@ -641,7 +640,7 @@ function startJobs() {
     } catch (err) {
       console.error('Reconcile loop error:', err);
     }
-  }, RECONCILE_INTERVAL_MS);
+  }, LOYVERSE_RECONCILE_INTERVAL_MS);
 }
 
 setTimeout(startJobs, 10000);
