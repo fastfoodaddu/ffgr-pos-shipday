@@ -1,7 +1,7 @@
 {
-  "name": "ewity-railway",
+  "name": "ffgr-ewity-shipday-bridge",
   "version": "1.0.0",
-  "description": "Ewity to Railway bridge",
+  "description": "FFGR Ewity to Shipday bridge",
   "main": "server.js",
   "type": "module",
   "scripts": {
