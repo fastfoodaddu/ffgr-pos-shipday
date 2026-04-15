@@ -8,7 +8,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 const TIME_ZONE = 'Indian/Maldives';
 
-const EWITY_BASE = 'https://app.ewitypos.com/api/ecom-v1';
+const EWITY_BASE = process.env.EWITY_API_BASE_URL;
 const EWITY_ORDERS_PATH = process.env.EWITY_ORDERS_PATH || '/bills';
 const SHIPDAY_BASE = 'https://api.shipday.com';
 
