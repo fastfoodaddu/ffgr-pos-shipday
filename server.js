@@ -162,6 +162,49 @@ async function sendToShipday(payload) {
 
   return response.data;
 }
+app.get("/probe-ecom", async (req, res) => {
+  const endpoints = [
+    "/api/ecom-v1/orders",
+    "/api/ecom-v1/orders/my",
+    "/api/ecom-v1/orders/list",
+    "/api/ecom-v1/merchant/orders",
+    "/api/ecom-v1/bills",
+    "/api/ecom-v1/sales",
+    "/api/ecom-v1/location-orders",
+    "/api/ecom-v1/customers"
+  ];
+
+  const results = [];
+
+  for (const ep of endpoints) {
+    try {
+      const response = await axios.get(`https://app.ewitypos.com${ep}`, {
+        headers: {
+          Authorization: `Bearer ${process.env.EWITY_BEARER}`,
+          "X-Ewity-Platform": "web",
+          Accept: "application/json"
+        },
+        timeout: 15000
+      });
+
+      results.push({
+        endpoint: ep,
+        ok: true,
+        status: response.status,
+        data: response.data
+      });
+    } catch (err) {
+      results.push({
+        endpoint: ep,
+        ok: false,
+        status: err.response?.status || 500,
+        error: err.response?.data || err.message
+      });
+    }
+  }
+
+  res.json(results);
+});
 app.get("/ewity-orders", async (req, res) => {
   try {
     const location = req.query.location || "Fastfood1";
