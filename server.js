@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-console.log("DEPLOY VERSION 2026-04-16-ewity-api-pull");
+console.log("DEPLOY VERSION 2026-04-16-ewity-pull-and-shipday-push");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -21,6 +21,7 @@ app.use((req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 const EWITY_BEARER = process.env.EWITY_BEARER || "";
+const SHIPDAY_API_KEY = process.env.SHIPDAY_API_KEY || "";
 
 function ewityHeaders(extra = {}) {
   return {
@@ -29,6 +30,28 @@ function ewityHeaders(extra = {}) {
     "Content-Type": "application/json",
     ...extra,
   };
+}
+
+function shipdayHeaders() {
+  return {
+    Authorization: `Basic ${SHIPDAY_API_KEY}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+}
+
+function getTimeHHMMSS() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function parseMoney(text) {
+  if (text == null) return 0;
+  const cleaned = String(text).replace(/[^0-9.-]/g, "");
+  return Number(cleaned || 0);
 }
 
 function extractPublicBillIdFromUrl(url) {
@@ -44,6 +67,58 @@ function extractPublicBillIdFromUrl(url) {
   } catch {
     return null;
   }
+}
+
+function mapPublicBillToShipday(publicBillJson) {
+  const bill = publicBillJson?.bill || {};
+  const customer = bill?.customer?.object || {};
+  const headerParts = Array.isArray(bill?.header_parts) ? bill.header_parts : [];
+  const totalParts = Array.isArray(bill?.total_parts) ? bill.total_parts : [];
+  const lines = Array.isArray(bill?.bill_lines) ? bill.bill_lines : [];
+
+  const headerMap = Object.fromEntries(headerParts.map((p) => [p.key, p.value]));
+  const totalMap = Object.fromEntries(totalParts.map((p) => [p.key, p.value]));
+
+  const orderItems = lines.map((line) => ({
+    name: line?.variant?.name || "Item",
+    unitPrice: parseMoney(line?.total_text),
+    quantity: Number(String(line?.quantity_text || "1").match(/[0-9.]+/)?.[0] || 1),
+    addOns: [],
+  }));
+
+  const payload = {
+    orderNumber:
+      headerMap["Bill Number"] ||
+      bill?.number ||
+      bill?.client_bill_id ||
+      "",
+    customerName: customer?.name || "FFGR Customer",
+    customerPhoneNumber: customer?.mobile || "",
+    customerAddress: process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
+    restaurantName: process.env.RESTAURANT_NAME || "FFGR",
+    totalOrderCost: parseMoney(totalMap["Total"] || bill?.total_text),
+    expectedPickupTime: getTimeHHMMSS(),
+    pickupAddress:
+      process.env.FFGR_PICKUP_ADDRESS ||
+      "Fast Food Gourmet Restaurant, Hithadhoo, Addu City",
+    orderItems,
+    notes: [
+      `Ewity Public Bill ID: ${publicBillJson?.id || ""}`,
+      `Ewity Client Bill ID: ${bill?.client_bill_id || ""}`,
+      `Payment Status: ${headerMap["Payment Status"] || bill?.payment_status || ""}`,
+      `Date: ${headerMap["Date"] || ""}`,
+    ].filter(Boolean).join(" | "),
+  };
+
+  if (process.env.FFGR_PICKUP_LAT) {
+    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
+  }
+
+  if (process.env.FFGR_PICKUP_LNG) {
+    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
+  }
+
+  return payload;
 }
 
 async function fetchAsyncTasks(limit = 5) {
@@ -71,19 +146,41 @@ async function fetchDr3Bill(clientBillId) {
   return response.data;
 }
 
+async function sendToShipday(payload) {
+  if (!SHIPDAY_API_KEY) {
+    throw new Error("SHIPDAY_API_KEY is missing");
+  }
+
+  const response = await axios.post(
+    "https://api.shipday.com/orders",
+    payload,
+    {
+      headers: shipdayHeaders(),
+      timeout: 20000,
+    }
+  );
+
+  return response.data;
+}
+
 app.get("/", (req, res) => {
   res.json({
     status: "running",
-    service: "ewity-api-pull",
+    service: "ewity-pull-and-shipday-push",
     ewity_bearer: EWITY_BEARER ? "available" : "missing",
+    shipday_api_key: SHIPDAY_API_KEY ? "available" : "missing",
   });
 });
 
 app.get("/version", (req, res) => {
   res.json({
-    version: "2026-04-16-ewity-api-pull",
+    version: "2026-04-16-ewity-pull-and-shipday-push",
   });
 });
+
+/* ---------------------------
+   EWITY PRIVATE API PULL ROUTES
+---------------------------- */
 
 app.get("/test-ewity-orders", async (req, res) => {
   try {
@@ -92,7 +189,7 @@ app.get("/test-ewity-orders", async (req, res) => {
 
     res.json({
       success: true,
-      endpoint: "GET /api/v1/async-tasks/my",
+      endpoint: "GET https://app.ewitypos.com/api/v1/async-tasks/my?limit=N",
       data,
     });
   } catch (err) {
@@ -121,7 +218,7 @@ app.post("/test-dr3-bill", async (req, res) => {
 
     res.json({
       success: true,
-      endpoint: "POST /api/v1/ebills/dr3-bill",
+      endpoint: "POST https://app.ewitypos.com/api/v1/ebills/dr3-bill",
       client_bill_id,
       publicUrl,
       publicBillId,
@@ -153,7 +250,7 @@ app.get("/test-dr3-bill-get", async (req, res) => {
 
     res.json({
       success: true,
-      endpoint: "POST /api/v1/ebills/dr3-bill",
+      endpoint: "POST https://app.ewitypos.com/api/v1/ebills/dr3-bill",
       client_bill_id,
       publicUrl,
       publicBillId,
@@ -189,10 +286,75 @@ app.get("/pull-order-chain", async (req, res) => {
       dr3,
       publicUrl,
       publicBillId,
-      note: "Public bill details route on my.ewity.com was not reliable server-to-server from Railway due to 403.",
+      note: "Full public bill JSON from my.ewity.com was not reliable server-to-server from Railway due to 403. Use browser-posted JSON for Shipday push.",
     });
   } catch (err) {
     console.error("pull-order-chain error:", err.response?.data || err.message);
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
+/* ---------------------------
+   SHIPDAY PUSH ROUTES
+---------------------------- */
+
+app.post("/test-public-bill-json", (req, res) => {
+  try {
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
+
+    res.json({
+      success: true,
+      received: publicBillJson,
+      shipdayPayload,
+    });
+  } catch (err) {
+    console.error("test-public-bill-json error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
+app.post("/debug-public-bill-json", (req, res) => {
+  try {
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
+
+    res.json({
+      success: true,
+      expectedPickupTimeValue: shipdayPayload.expectedPickupTime,
+      shipdayPayload,
+    });
+  } catch (err) {
+    console.error("debug-public-bill-json error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
+app.post("/send-public-bill-json-to-shipday", async (req, res) => {
+  try {
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
+    const shipdayResponse = await sendToShipday(shipdayPayload);
+
+    res.json({
+      success: true,
+      shipdayPayload,
+      shipdayResponse,
+    });
+  } catch (err) {
+    console.error(
+      "send-public-bill-json-to-shipday error:",
+      err.response?.data || err.message
+    );
     res.status(err.response?.status || 500).json({
       success: false,
       error: err.response?.data || err.message,
