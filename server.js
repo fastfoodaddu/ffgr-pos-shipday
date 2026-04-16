@@ -21,19 +21,27 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const SHIPDAY_API_KEY = process.env.SHIPDAY_API_KEY || "";
 
-function shipdayHeaders() {
-  return {
-    Authorization: `Basic ${SHIPDAY_API_KEY}`,
-    Accept: "application/json",
-    "Content-Type": "application/json",
-  };
-}
 function getTimeHHMMSS() {
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
+}
+
+function getTodayYYYYMMDD() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+function shipdayHeaders() {
+  return {
+    Authorization: `Basic ${SHIPDAY_API_KEY}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
 }
 
 function mapPublicBillToShipday(publicBillJson) {
