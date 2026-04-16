@@ -162,7 +162,74 @@ async function sendToShipday(payload) {
 
   return response.data;
 }
+app.get("/send-by-bill-number", async (req, res) => {
+  try {
+    const billNumber = req.query.bill;
 
+    if (!billNumber) {
+      return res.status(400).json({
+        success: false,
+        error: "bill query is required. Example: ?bill=1/000007"
+      });
+    }
+
+    console.log("Processing bill:", billNumber);
+
+    // STEP 1 — Get DR3 Bill
+    const dr3 = await fetchDr3Bill(billNumber);
+
+    const publicUrl = dr3?.data?.url || dr3?.url || null;
+
+    if (!publicUrl) {
+      return res.json({
+        success: false,
+        error: "No public bill URL returned from Ewity"
+      });
+    }
+
+    console.log("Public URL:", publicUrl);
+
+    // STEP 2 — Build MINIMUM Shipday payload
+    const shipdayPayload = {
+      orderNumber: billNumber,
+      customerName: "Walk-in / Ewity Order",
+      customerPhoneNumber: "",
+      customerAddress: process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
+      restaurantName: process.env.RESTAURANT_NAME || "FFGR",
+      totalOrderCost: 0,
+      expectedPickupTime: getTimeHHMMSS(),
+      pickupAddress: process.env.FFGR_PICKUP_ADDRESS,
+      orderItems: [
+        {
+          name: "Ewity Order",
+          unitPrice: 0,
+          quantity: 1,
+          addOns: []
+        }
+      ],
+      notes: `Ewity Bill: ${billNumber} | URL: ${publicUrl}`
+    };
+
+    // STEP 3 — Send to Shipday
+    const shipdayResponse = await sendToShipday(shipdayPayload);
+
+    res.json({
+      success: true,
+      billNumber,
+      publicUrl,
+      shipdayPayload,
+      shipdayResponse
+    });
+
+  } catch (err) {
+    console.error("send-by-bill-number error:", err.response?.data || err.message);
+
+    res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message
+    });
+  }
+});
 app.get("/", (req, res) => {
   res.json({
     status: "running",
