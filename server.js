@@ -3,6 +3,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 
 dotenv.config();
+console.log("DEPLOY VERSION 2026-04-16-debug-route-live");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -185,7 +186,7 @@ app.post("/debug-public-bill-json", (req, res) => {
 });
 app.get("/version", (req, res) => {
   res.json({
-    version: "debug-route-added-v1"
+    version: "2026-04-16-debug-route-live"
   });
 });
 app.listen(PORT, "0.0.0.0", () => {
