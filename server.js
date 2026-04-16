@@ -183,6 +183,11 @@ app.post("/debug-public-bill-json", (req, res) => {
     });
   }
 });
+app.get("/version", (req, res) => {
+  res.json({
+    version: "debug-route-added-v1"
+  });
+});
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
