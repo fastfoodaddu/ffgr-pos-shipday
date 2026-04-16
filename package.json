@@ -1,56 +1,15 @@
-fetch("https://ffgr-pos-shipday-production.up.railway.app/test-public-bill-json", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json"
+{
+  "name": "ffgr-ewity-shipday-bridge",
+  "version": "1.0.0",
+  "description": "FFGR browser JSON to Shipday bridge",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
   },
-  body: JSON.stringify({
-    "id":"kavcaBO2",
-    "bill":{
-      "client_bill_id":"1776277809421/c6fc2538-4316-490b-8cf1-1ce015bf39fa",
-      "number":"1776277809421/c6fc2538-4316-490b-8cf1-1ce015bf39fa",
-      "payment_status":"payment-pending",
-      "total_text":"MVR 60",
-      "date_diff_text":"43 minutes ago",
-      "company":{"id":9247,"name":"Fast Collection Pvt Ltd","domain":"fcpvtltd","logo":null,"has_loyalty":false},
-      "bill_lines":[
-        {
-          "id":"ef1dc213-7c3e-44e3-ab39-e894ded03167",
-          "variant":{"name":"Fried Rice"},
-          "quantity_text":"1 pcs",
-          "total_text":"55.56"
-        }
-      ],
-      "customer":{
-        "object":{"name":"Mitthu","mobile":"7409000"},
-        "can_link_customer":false,
-        "cant_link_reason":"NO_MY_EWITY_USER"
-      },
-      "total_parts":[
-        {"key":"Sub Total","value":"55.56"},
-        {"key":"Total Taxes","value":"4.44"},
-        {"key":"Total","value":"60.00"},
-        {"key":"Total Outstanding","value":"60.00"}
-      ],
-      "header_parts":[
-        {"key":"Bill Number","value":"1/000007"},
-        {"key":"Date","value":"15-Apr-2026"},
-        {"key":"Payment Status","value":"Not Paid"}
-      ],
-      "main_header":{"logo":null,"name":"Fast Collection Pvt Ltd","parts":[]},
-      "live_bill":true,
-      "payment":{
-        "can_pay":false,
-        "cant_pay_reason":"NO_PAYMENT_METHOD",
-        "payment_methods":[],
-        "payment_amount":60,
-        "payment_amount_formatted":"MVR 60.00",
-        "online_payments":[]
-      },
-      "can_download_pdf":false
-    },
-    "loggedIn":false
-  })
-})
-.then(r => r.json())
-.then(console.log)
-.catch(console.error);
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
