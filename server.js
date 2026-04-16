@@ -166,7 +166,23 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
   console.error("UNCAUGHT EXCEPTION:", err);
 });
+app.post("/debug-public-bill-json", (req, res) => {
+  try {
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
 
+    res.json({
+      success: true,
+      expectedPickupTimeValue: shipdayPayload.expectedPickupTime,
+      shipdayPayload
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
