@@ -3,12 +3,12 @@ import axios from "axios";
 import dotenv from "dotenv";
 
 dotenv.config();
+
 console.log("DEPLOY VERSION 2026-04-16-debug-route-live");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// Simple CORS middleware
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -121,6 +121,12 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/version", (req, res) => {
+  res.json({
+    version: "2026-04-16-debug-route-live",
+  });
+});
+
 app.post("/test-public-bill-json", (req, res) => {
   try {
     const publicBillJson = req.body;
@@ -140,6 +146,25 @@ app.post("/test-public-bill-json", (req, res) => {
   }
 });
 
+app.post("/debug-public-bill-json", (req, res) => {
+  try {
+    const publicBillJson = req.body;
+    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
+
+    res.json({
+      success: true,
+      expectedPickupTimeValue: shipdayPayload.expectedPickupTime,
+      shipdayPayload,
+    });
+  } catch (err) {
+    console.error("debug-public-bill-json error:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
 app.post("/send-public-bill-json-to-shipday", async (req, res) => {
   try {
     const publicBillJson = req.body;
@@ -152,7 +177,10 @@ app.post("/send-public-bill-json-to-shipday", async (req, res) => {
       shipdayResponse,
     });
   } catch (err) {
-    console.error("send-public-bill-json-to-shipday error:", err.response?.data || err.message);
+    console.error(
+      "send-public-bill-json-to-shipday error:",
+      err.response?.data || err.message
+    );
     res.status(err.response?.status || 500).json({
       success: false,
       error: err.response?.data || err.message,
@@ -167,28 +195,7 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
   console.error("UNCAUGHT EXCEPTION:", err);
 });
-app.post("/debug-public-bill-json", (req, res) => {
-  try {
-    const publicBillJson = req.body;
-    const shipdayPayload = mapPublicBillToShipday(publicBillJson);
 
-    res.json({
-      success: true,
-      expectedPickupTimeValue: shipdayPayload.expectedPickupTime,
-      shipdayPayload
-    });
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-app.get("/version", (req, res) => {
-  res.json({
-    version: "2026-04-16-debug-route-live"
-  });
-});
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
