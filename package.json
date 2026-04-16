@@ -1,7 +1,7 @@
 {
-  "name": "ffgr-ewity-shipday-bridge",
+  "name": "ffgr-ewity-api-pull",
   "version": "1.0.0",
-  "description": "FFGR Ewity to Shipday bridge",
+  "description": "FFGR Ewity API pull server",
   "main": "server.js",
   "type": "module",
   "scripts": {
