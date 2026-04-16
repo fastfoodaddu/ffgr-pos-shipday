@@ -162,6 +162,34 @@ async function sendToShipday(payload) {
 
   return response.data;
 }
+app.get("/ewity-orders", async (req, res) => {
+  try {
+    const location = req.query.location || "Fast Collection Pvt Ltd-1";
+
+    const response = await axios.get(
+      "https://app.ewitypos.com/api/ecom-v1/orders",
+      {
+        params: { location },
+        headers: {
+          Authorization: `Bearer ${process.env.EWITY_BEARER}`,
+          "X-Ewity-Platform": "web",
+          Accept: "application/json"
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      location,
+      data: response.data
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message
+    });
+  }
+});
 app.get("/send-by-bill-number", async (req, res) => {
   try {
     const billNumber = req.query.bill;
