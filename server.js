@@ -28,7 +28,65 @@ function shipdayHeaders() {
     "Content-Type": "application/json",
   };
 }
+function getTimeHHMMSS() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
 
+function mapPublicBillToShipday(publicBillJson) {
+  const bill = publicBillJson?.bill || {};
+  const customer = bill?.customer?.object || {};
+  const headerParts = Array.isArray(bill?.header_parts) ? bill.header_parts : [];
+  const totalParts = Array.isArray(bill?.total_parts) ? bill.total_parts : [];
+  const lines = Array.isArray(bill?.bill_lines) ? bill.bill_lines : [];
+
+  const headerMap = Object.fromEntries(headerParts.map((p) => [p.key, p.value]));
+  const totalMap = Object.fromEntries(totalParts.map((p) => [p.key, p.value]));
+
+  const orderItems = lines.map((line) => ({
+    name: line?.variant?.name || "Item",
+    unitPrice: parseMoney(line?.total_text),
+    quantity: Number(String(line?.quantity_text || "1").match(/[0-9.]+/)?.[0] || 1),
+    addOns: [],
+  }));
+
+  const payload = {
+    orderNumber:
+      headerMap["Bill Number"] ||
+      bill?.number ||
+      bill?.client_bill_id ||
+      "",
+    customerName: customer?.name || "FFGR Customer",
+    customerPhoneNumber: customer?.mobile || "",
+    customerAddress: process.env.DEFAULT_CUSTOMER_ADDRESS || "Address not provided",
+    restaurantName: process.env.RESTAURANT_NAME || "FFGR",
+    totalOrderCost: parseMoney(totalMap["Total"] || bill?.total_text),
+    expectedPickupTime: getTimeHHMMSS(),
+    pickupAddress:
+      process.env.FFGR_PICKUP_ADDRESS ||
+      "Fast Food Gourmet Restaurant, Hithadhoo, Addu City",
+    orderItems,
+    notes: [
+      `Ewity Public Bill ID: ${publicBillJson?.id || ""}`,
+      `Ewity Client Bill ID: ${bill?.client_bill_id || ""}`,
+      `Payment Status: ${headerMap["Payment Status"] || bill?.payment_status || ""}`,
+      `Date: ${headerMap["Date"] || ""}`,
+    ].filter(Boolean).join(" | "),
+  };
+
+  if (process.env.FFGR_PICKUP_LAT) {
+    payload.pickupLatitude = Number(process.env.FFGR_PICKUP_LAT);
+  }
+
+  if (process.env.FFGR_PICKUP_LNG) {
+    payload.pickupLongitude = Number(process.env.FFGR_PICKUP_LNG);
+  }
+
+  return payload;
+}
 function parseMoney(text) {
   if (text == null) return 0;
   const cleaned = String(text).replace(/[^0-9.-]/g, "");
