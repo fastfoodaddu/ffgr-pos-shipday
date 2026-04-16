@@ -164,7 +164,7 @@ async function sendToShipday(payload) {
 }
 app.get("/ewity-orders", async (req, res) => {
   try {
-    const location = req.query.location || "Fast Collection Pvt Ltd-1";
+    const location = req.query.location || "Fastfood1";
 
     const response = await axios.get(
       "https://app.ewitypos.com/api/ecom-v1/orders",
