@@ -1,15 +1,68 @@
-{
-  "name": "ffgr-ewity-shipday-bridge",
-  "version": "1.0.0",
-  "description": "FFGR browser JSON to Shipday bridge",
-  "main": "server.js",
-  "type": "module",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "axios": "^1.7.9",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2"
-  }
+import express from "express";
+import axios from "axios";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const EWITY_BASE = "https://api.ewitypos.com";
+const EWITY_TOKEN = process.env.EWITY_TOKEN;
+
+function ewityHeaders() {
+  return {
+    Authorization: `Bearer ${EWITY_TOKEN}`,
+    Accept: "application/json",
+    "Content-Type": "application/json"
+  };
 }
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "running",
+    ewity_token: EWITY_TOKEN ? "available" : "missing"
+  });
+});
+
+// Simple token test
+app.get("/test-ewity", async (req, res) => {
+  try {
+    const response = await axios.get(`${EWITY_BASE}/v1/ui/payment-types`, {
+      headers: ewityHeaders()
+    });
+
+    res.json({
+      success: true,
+      message: "Ewity token works",
+      data: response.data
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message
+    });
+  }
+});
+
+// Example sales endpoint test
+app.get("/test-bill", async (req, res) => {
+  try {
+    const qr = encodeURIComponent("https://my.ewity.com/b/sYjhWel5");
+    const response = await axios.get(
+      `${EWITY_BASE}/v1/sales/bills/from-qr?qr=${qr}`,
+      { headers: ewityHeaders() }
+    );
+
+    res.json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.response?.data || err.message
+    });
+  }
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
