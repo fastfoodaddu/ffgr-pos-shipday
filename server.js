@@ -7,6 +7,17 @@ dotenv.config();
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// Simple CORS middleware
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 const PORT = process.env.PORT || 3000;
 const SHIPDAY_API_KEY = process.env.SHIPDAY_API_KEY || "";
 
@@ -61,7 +72,7 @@ function mapPublicBillToShipday(publicBillJson) {
       `Ewity Public Bill ID: ${publicBillJson?.id || ""}`,
       `Ewity Client Bill ID: ${bill?.client_bill_id || ""}`,
       `Payment Status: ${headerMap["Payment Status"] || bill?.payment_status || ""}`,
-      `Date: ${headerMap["Date"] || ""}`
+      `Date: ${headerMap["Date"] || ""}`,
     ].filter(Boolean).join(" | "),
   };
 
